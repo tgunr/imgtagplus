@@ -12,9 +12,12 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # Extensions recognised as images (case-insensitive matching).
+# Vector drawing formats (.svg/.dxf) are discovered here too — they are
+# rasterized on the fly by app.py via converter before tagging.
 IMAGE_EXTENSIONS: set[str] = {
     ".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif",
     ".bmp", ".gif",
+    ".svg", ".dxf",
 }
 
 

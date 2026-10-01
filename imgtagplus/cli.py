@@ -387,6 +387,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="Seconds to wait before auto-continuing on error.",
     )
+    p.add_argument(
+        "--no-vector",
+        action="store_true",
+        default=False,
+        help="Skip SVG/DXF vector drawings instead of rasterizing and tagging them.",
+    )
+    p.add_argument(
+        "--vector-px",
+        type=int,
+        default=1024,
+        help="Longest raster side (px) when converting SVG/DXF drawings (default: 1024).",
+    )
 
     # ── Logging ────────────────────────────────────────────────────────────
     p.add_argument(

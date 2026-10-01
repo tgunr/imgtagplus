@@ -15,6 +15,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from imgtagplus import logger as log_setup
+from imgtagplus.converter import (
+    DEFAULT_RASTER_PX,
+    VECTOR_EXTENSIONS,
+    ConversionError,
+    UnsupportedVectorError,
+    VectorFormatError,
+    rasterize_vector,
+)
 from imgtagplus.metadata import write_xmp
 from imgtagplus.monitor import Monitor
 from imgtagplus.profiler import AVAILABLE_MODELS
@@ -22,6 +30,25 @@ from imgtagplus.scanner import scan
 from imgtagplus.tags import TAGS
 
 log = logging.getLogger(__name__)
+
+
+def _tag_with(tagger, image_path: Path, args: argparse.Namespace) -> list[tuple[str, float]]:
+    """Run the active tagger against *image_path* with the run's settings.
+
+    Different taggers need different args: CLIP takes tags/threshold,
+    Florence-2 VLMs ignore them.
+    """
+    if getattr(tagger, "precompute_tag_embeddings", None):
+        return tagger.tag_image(
+            image_path,
+            tags=TAGS,
+            threshold=args.threshold,
+            max_tags=args.max_tags,
+        )
+    return tagger.tag_image(
+        image_path,
+        max_tags=args.max_tags,
+    )
 
 
 def _format_runtime(seconds: float) -> str:
@@ -183,20 +210,34 @@ def run(args: argparse.Namespace, progress_callback: Optional[Callable[[int, int
                 log.warning("Progress callback failed: %s", cb_exc)
 
         try:
-            # Different taggers need different args. CLIP needs tags/threshold.
-            if getattr(tagger, "precompute_tag_embeddings", None):
-                results = tagger.tag_image(
-                    img_path,
-                    tags=TAGS,
-                    threshold=args.threshold,
-                    max_tags=args.max_tags,
-                )
+            if img_path.suffix.lower() in VECTOR_EXTENSIONS:
+                # Vector drawing: validate + rasterize into an isolated
+                # temporary PNG, tag that, then write the sidecar against
+                # the ORIGINAL vector file.
+                if getattr(args, "no_vector", False):
+                    log.info("  -> skipped (--no-vector): %s", img_path.name)
+                    continue
+                try:
+                    with rasterize_vector(
+                        img_path,
+                        target_px=getattr(args, "vector_px", DEFAULT_RASTER_PX),
+                    ) as raster:
+                        results = _tag_with(tagger, raster.path, args)
+                except (VectorFormatError, UnsupportedVectorError) as exc:
+                    error_count += 1
+                    log.error("  Unsupported vector file %s: %s", img_path, exc)
+                    should_continue = _prompt_on_error(
+                        message=f"Unsupported vector file {img_path.name}: {exc}",
+                        timeout=args.input_timeout,
+                        silent=args.silent,
+                        continue_on_error=args.continue_on_error,
+                    )
+                    if not should_continue:
+                        log.info("Aborting at user request.")
+                        break
+                    continue
             else:
-                # Florence-2 VLMs ignore threshold/tags params 
-                results = tagger.tag_image(
-                    img_path,
-                    max_tags=args.max_tags,
-                )
+                results = _tag_with(tagger, img_path, args)
 
             tag_names = [t for t, _ in results]
             log.info(

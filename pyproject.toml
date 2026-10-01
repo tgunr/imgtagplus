@@ -33,6 +33,8 @@ dependencies = [
     "transformers>=4.44.2,<6.0.0",
     "einops>=0.7.0",
     "timm>=0.9.12",
+    "ezdxf>=1.1.0",
+    "matplotlib>=3.7.0",
     "textual>=0.60.0"
 ]
 
