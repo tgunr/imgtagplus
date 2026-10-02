@@ -7,6 +7,7 @@ error handling into a single ``run()`` function called by the CLI.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import threading
 import time
@@ -24,6 +25,7 @@ from imgtagplus.converter import (
     rasterize_vector,
 )
 from imgtagplus.metadata import (
+    TAG_SIDECAR_SUFFIX,
     compute_file_hash,
     read_tag_sidecar,
     write_tag_sidecar,
@@ -36,11 +38,114 @@ from imgtagplus.tags import (
     TAGS,
     TaxonomyError,
     apply_feedback_at_scan,
+    collect_similar_feedback,
+    derive_tags_from_clip_results,
     make_override,
     validate_axis_key,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _scan_roots(images, output_dir: Path | None) -> set[Path]:
+    """Directories a scan reads feedback from: every image dir + the output dir."""
+    roots = {Path(p).parent for p in images}
+    if output_dir is not None:
+        roots.add(Path(output_dir))
+    return roots
+
+
+def _build_feedback_index(roots) -> list[dict]:
+    """Collect every persisted ``feedback_for_future_scans`` artifact under *roots*.
+
+    ``build_feedback_artifact`` stores only a hash-prefix pattern, never the full
+    hash, so the only way a scan can honor feedback recorded against a *different*
+    but similar file is to read the artifacts of the files it knows about.  One
+    flat list of artifacts is enough — :func:`collect_similar_feedback` buckets
+    them by hash prefix when a candidate is scored.
+    """
+    artifacts: list[dict] = []
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            sidecars = sorted(Path(root).glob(f"*{TAG_SIDECAR_SUFFIX}"))
+        except OSError:  # pragma: no cover - unreadable dir
+            continue
+        for sidecar in sidecars:
+            if sidecar in seen:
+                continue
+            seen.add(sidecar)
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                feedback = data.get("feedback_for_future_scans")
+                if isinstance(feedback, dict) and feedback:
+                    artifacts.append(feedback)
+    return artifacts
+
+
+def _persist_scan_taxonomy(
+    image_path: Path,
+    results,
+    *,
+    feedback_index: list[dict] | None = None,
+    output_dir: Path | None = None,
+) -> None:
+    """Persist this scan's derived taxonomy tags into the JSON sidecar.
+
+    Before this existed the scan loop wrote XMP and then re-read the sidecar for
+    feedback, but nothing ever wrote ``derived_tags`` — so on a fresh scan the
+    sidecar stayed empty and the entire feedback path was dead.  This buckets the
+    CLIP results into taxonomy axes (:func:`derive_tags_from_clip_results`) and
+    stores them, merging human input that already exists in the file: pure
+    ``derived`` records are replaced by a fresh scan, while axes the human
+    confirmed, overrode, or deleted are left untouched for
+    :func:`_refresh_scan_feedback` to re-assert afterwards.
+    """
+    try:
+        file_hash = compute_file_hash(image_path)
+        sidecar = read_tag_sidecar(image_path, output_dir=output_dir)
+        derived = derive_tags_from_clip_results(results)
+
+        # Human input outranks the analyzer: drop any fresh guess on an axis the
+        # user already confirmed, overrode, or deleted so the persisted set can
+        # never contradict the stored feedback artifact.
+        human_axes = {
+            *(sidecar.get("user_tags") or {}),
+            *(sidecar.get("user_overrides") or {}),
+            *(sidecar.get("user_deletions") or ()),
+        }
+        for axis in human_axes:
+            derived.pop(axis, None)
+
+        # Feedback recorded against a *similar* file (shared hash-prefix bucket),
+        # not just this exact file, so a human's answer to "what is this part"
+        # carries over to a re-export of it.
+        feedback = collect_similar_feedback(feedback_index or (), file_hash)
+        if not feedback:
+            feedback = sidecar.get("feedback_for_future_scans") or {}
+        if feedback:
+            # ``apply_feedback_at_scan`` answers "what is the effective tag for
+            # each axis".  The ``derived_tags`` slot is only for analyzer
+            # output, so keep the original record where the answer came from
+            # ``derived`` and drop it everywhere a human won — the stored
+            # feedback artifact is what re-asserts those axes on the next read.
+            effective = apply_feedback_at_scan(feedback, derived)
+            for axis, record in effective.items():
+                if not isinstance(record, dict) or record.get("source") == "derived":
+                    continue
+                derived.pop(axis, None)
+
+        write_tag_sidecar(
+            image_path,
+            derived_tags=derived,
+            file_hash=file_hash,
+            output_dir=output_dir,
+        )
+    except Exception as exc:  # pragma: no cover - never break a scan
+        log.warning("Could not persist taxonomy tags for %s: %s", image_path, exc)
 
 
 def _refresh_scan_feedback(image_path: Path) -> None:
@@ -301,6 +406,12 @@ def run(args: argparse.Namespace, progress_callback: Optional[Callable[[int, int
     success_count = 0
     error_count = 0
 
+    # Feedback recorded against a *different* but similar file lives in that
+    # file's sidecar, so gather every artifact in the scan's directories once.
+    feedback_index = _build_feedback_index(_scan_roots(images, args.output_dir))
+    if feedback_index:
+        log.info("Loaded %d feedback artifact(s) for cross-file matching", len(feedback_index))
+
     for idx, img_path in enumerate(images, 1):
         log.info("[%d/%d] Tagging: %s", idx, len(images), img_path)
         
@@ -356,6 +467,12 @@ def run(args: argparse.Namespace, progress_callback: Optional[Callable[[int, int
                 overwrite=getattr(args, "overwrite", False),
             )
             xmp_dirs.add(xmp_path.parent)
+            _persist_scan_taxonomy(
+                img_path,
+                results,
+                feedback_index=feedback_index,
+                output_dir=args.output_dir,
+            )
             _refresh_scan_feedback(img_path)
             success_count += 1
 

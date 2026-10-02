@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence, cast
 
 # ---------------------------------------------------------------------------
 # Tag vocabulary — ~600 tags across common categories
@@ -308,6 +308,184 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# CLIP label → taxonomy axis bucketing
+#
+# ``TAGS`` is a flat vocabulary of ~600 general image labels ("blueprint",
+# "cnc part", "workshop").  The taxonomy is five orthogonal axes.  Nothing
+# else in the pipeline bridges the two, so this table is the only place that
+# decides which axis a CLIP label speaks to and which legal value it implies.
+#
+# Each entry is ``(axis, ((value_key, keywords), ...))`` where ``keywords`` are
+# lowercase word phrases matched as a *token subset* against the normalized
+# label — never as a raw substring, so ``sketch`` cannot match ``etch``.
+# ---------------------------------------------------------------------------
+
+#: ``{axis: ((value_key, (phrase, ...)), ...)}`` — the CLIP→taxonomy table.
+_ClipAxisKeywords = dict[str, tuple[tuple[str, tuple[str, ...]], ...]]
+
+_CLIP_AXIS_KEYWORDS = cast(
+        "_ClipAxisKeywords",
+        {
+        "process": (
+            ("POCKET_MILL", ("pocket milling", "pocket mill", "milling", "milled", "mill")),
+            ("PROFILE_CUT", ("profile cutting", "profile cut", "profiling", "routing", "router")),
+            ("ENGRAVE", ("engraving", "engraved", "engraver", "engrave")),
+            ("ETCH", ("etching", "etched", "etch")),
+            ("DRILL", ("drilling", "drilled", "drill", "holes", "boring")),
+            ("MARK", ("marking", "marking pen", "marker", "scribing", "scribe")),
+            ("INLAY", ("inlay", "inlaid", "inlaying")),
+            ("FIXTURE", ("fixture", "jig", "clamp", "workholding")),
+            ("STENCIL", ("stencil", "template mask")),
+        ),
+        "geometry_kind": (
+            ("OPEN_CONTOUR", ("open contour", "open path", "single line drawing", "line drawing", "line art")),
+            ("CLOSED_CONTOUR", ("closed contour", "closed path", "outline")),
+            ("FILLED_AREA", ("solid fill", "filled area", "solid shape", "silhouette", "filled region")),
+            ("HATCH", ("hatching", "hatched", "crosshatch", "cross hatch", "shading lines")),
+            ("POLYLINE_CHAIN", ("polyline", "chain link", "linked segments", "connected lines")),
+            ("POINT_CLOUD", ("point cloud", "dot matrix", "scatter plot", "scattered points")),
+            ("TEXT_BLOCK", ("text block", "lettering", "typography", "word art", "label text", "caption text")),
+            ("MIXED", ("mixed geometry", "multiple elements", "layout", "schematic")),
+        ),
+        "material_family": (
+            ("WOOD", ("wood", "wooden", "timber", "lumber", "hardwood", "oak", "walnut")),
+            ("PLYWOOD", ("plywood", "ply")),
+            ("MDF", ("mdf", "medium density fiberboard", "fiberboard")),
+            ("ACRYLIC", ("acrylic", "perspex", "plexiglass", "pmma")),
+            ("PLASTIC", ("plastic", "vinyl", "nylon", "petg", "abs plastic", "delrin", "polycarbonate")),
+            ("ALUMINUM", ("aluminum", "aluminium", "anodized")),
+            ("STEEL", ("steel", "stainless", "iron", "tool steel")),
+            ("BRASS", ("brass", "bronze")),
+            ("COPPER", ("copper",)),
+            ("LEATHER", ("leather", "hide")),
+            ("FABRIC", ("fabric", "cloth", "textile", "canvas", "canvas fabric", "felt", "denim")),
+            ("PAPER", ("paper", "poster", "cardstock", "newsprint")),
+            ("CARDBOARD", ("cardboard", "corrugated", "kraft")),
+            ("GLASS", ("glass", "glassy")),
+            ("STONE", ("stone", "granite", "marble", "concrete", "ceramic", "tile")),
+            ("RUBBER", ("rubber", "gasket", "neoprene")),
+            ("FOAM", ("foam", "foamboard", "cored foam")),
+            ("COMPOSITE", ("composite", "carbon fiber", "fiberglass", "laminate", "carbon fibre")),
+        ),
+        "machine_context": (
+            ("CNC_ROUTER", ("cnc router", "router machine", "router toolpath", "wood router")),
+            ("CNC_MILL", ("cnc mill", "cnc machining", "machined part", "milling machine", "mill part", "cnc part")),
+            ("LASER_CO2", ("laser cutter", "co2 laser", "laser cutting", "laser cut")),
+            ("LASER_FIBER", ("fiber laser", "fibre laser")),
+            ("DIODE_LASER", ("diode laser",)),
+            ("PLOTTER", ("plotter", "vinyl plotter", "cut plotter")),
+            ("VINYL_CUTTER", ("vinyl cutter", "weeding", "transfer tape", "vinyl decal")),
+            ("PRINTER_UV", ("uv printer", "inkjet printing", "screen print", "screen printing")),
+            ("3D_PRINTER", ("3d print", "3d printing", "3d printer", "printed part", "fdm", "sla print")),
+            ("HAND_TOOL", ("hand tool", "handheld tool", "workshop tools", "toolbox")),
+        ),
+        "output_intent": (
+            ("CUT_PATH", ("cut path", "cutting path", "toolpath", "cut file", "cutting file", "dxf file")),
+            ("ENGRAVE_RASTER", ("engrave image", "engraving raster", "engrave art")),
+            ("MARKING", ("marking layer", "marking file", "laser marking", "marking pattern")),
+            ("TEMPLATE", ("template", "pattern template", "template sheet", "transfer template")),
+            ("ARTWORK", ("artwork", "logo", "brand mark", "illustration", "vector art", "graphic design", "wall art")),
+            ("PROTOTYPE", ("prototype", "proof of concept", "sample part", "test fit")),
+            ("PRODUCTION", ("production run", "batch", "mass production", "production part")),
+            ("DOCUMENTATION", ("documentation", "technical drawing", "blueprint", "schematic", "cad drawing", "engineering drawing", "diagram", "plan view")),
+        ),
+    },
+)
+
+
+#: Pre-tokenized ``{axis: {value_key: (phrase_tokens, ...)}}`` for O(1) lookup.
+_CLIP_AXIS_TOKENS: dict[str, dict[str, tuple[frozenset[str], ...]]] = {
+    axis: {
+        value: tuple(
+            frozenset(token for token in phrase.split() if token)
+            for phrase in phrases
+        )
+        for value, phrases in entries
+    }
+    for axis, entries in _CLIP_AXIS_KEYWORDS.items()
+}
+
+
+def clip_axis_buckets(label: Any) -> dict[str, str]:
+    """Return ``{axis: value_key}`` implied by a single CLIP label.
+
+    A label may speak to more than one axis (``"cnc part"`` is both a machine
+    context and, via ``cnc machining``, a process signal), so this returns every
+    match rather than a single winner.  Values are always legal keys of
+    ``VALUE_LIST_BY_AXIS``; unmatched labels map to ``{}``.
+    """
+    canonical = normalize_key(label).lower()
+    if not canonical:
+        return {}
+    tokens = set(canonical.split("_"))
+    buckets: dict[str, str] = {}
+    for axis, values in _CLIP_AXIS_TOKENS.items():
+        for value, phrases in values.items():
+            if any(phrase <= tokens for phrase in phrases):
+                buckets[axis] = value
+                break
+    return buckets
+
+
+def derive_tags_from_clip_results(
+    results: Iterable[tuple[Any, Any]] | None,
+    *,
+    confidence_threshold: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Bucket raw ``(label, confidence)`` CLIP results into derived taxonomy tags.
+
+    One ``make_derived_tag`` record is emitted per axis, holding the value key
+    implied by the highest-scoring label that spoke to that axis.  Labels that
+    map to no axis (the large majority of ``TAGS``) are ignored rather than
+    forcing a value.
+
+    Scores are clamped into [0, 1]; an axis whose best evidence falls below
+    ``DERIVED_CONFIDENCE_THRESHOLD`` is suppressed entirely rather than written
+    as a weak guess.  Axes with no signal are simply absent from the result.
+    """
+    threshold = (
+        DERIVED_CONFIDENCE_THRESHOLD
+        if confidence_threshold is None
+        else float(confidence_threshold)
+    )
+
+    best: dict[str, tuple[float, int, str]] = {}
+    for order, entry in enumerate(results or ()):
+        try:
+            label, raw_score = entry
+        except (TypeError, ValueError):
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if score != score:  # NaN
+            continue
+        score = min(1.0, max(0.0, score))
+        for axis, value in clip_axis_buckets(label).items():
+            try:
+                validate_value_key(axis, value)
+            except TaxonomyError:  # pragma: no cover - table is validated
+                continue
+            current = best.get(axis)
+            # Highest score wins; ties break on declaration order so the result
+            # is deterministic regardless of input ordering.
+            if current is None or (score, -order) > (current[0], -current[1]):
+                best[axis] = (score, order, value)
+
+    derived: dict[str, dict[str, Any]] = {}
+    for axis in AXES:
+        hit = best.get(axis)
+        if hit is None:
+            continue
+        score, _order, value = hit
+        if score < threshold:
+            continue
+        derived[axis] = make_derived_tag(value, score)
+    return derived
+
+
 def make_derived_tag(key: str, confidence: Any) -> dict[str, Any]:
     """Build a validated derived-tag record.
 
@@ -597,6 +775,74 @@ def build_feedback_artifact(
     if pattern:
         artifact["similar_file_hash_pattern"] = pattern
     return artifact
+
+
+def feedback_applies_to_hash(
+    feedback: Mapping[str, Any] | None,
+    file_hash: Any,
+) -> bool:
+    """Return True when *feedback* was recorded against a similar file.
+
+    ``build_feedback_artifact`` stores only the hash-prefix pattern, never the
+    full hash, so cross-file influence is bucketed by prefix: two images whose
+    SHA-256 digests share the leading ``FEEDBACK_HASH_PREFIX_LEN`` characters
+    (a re-export, a re-encode, a duplicate) land in the same bucket.
+    """
+    if not isinstance(feedback, Mapping):
+        return False
+    pattern = str(feedback.get("similar_file_hash_pattern") or "")
+    if not pattern:
+        return False
+    prefix = pattern[:-1] if pattern.endswith("*") else pattern
+    text = normalize_key(file_hash).replace("_", "")
+    return bool(text) and bool(prefix) and text.startswith(prefix)
+
+
+def _feedback_specificity(artifact: Mapping[str, Any]) -> tuple[int, str]:
+    """Sort key ordering artifacts from least to most specific.
+
+    Specificity is the hash-prefix length (longer = more specific), and ties
+    break on ``applied_at_utc`` so the most recent human decision wins. The
+    timestamp is the second element so a newer-but-broader artifact still
+    applies before a stale-but-narrower one, which the merge then overwrites.
+    """
+    pattern = str(artifact.get("similar_file_hash_pattern") or "").rstrip("*")
+    return (len(pattern), str(artifact.get("applied_at_utc") or ""))
+
+
+def collect_similar_feedback(
+    artifacts: Iterable[Mapping[str, Any] | None],
+    file_hash: Any,
+) -> dict[str, Any]:
+    """Merge every feedback artifact whose hash bucket contains *file_hash*.
+
+    Precedence runs from least to most specific: shorter (broader) prefixes
+    are applied first so that a near-duplicate's more specific artifact wins
+    the axes they share.  Empty artifacts are dropped, so ``{}`` means "no
+    applicable human feedback" and callers can skip the apply entirely.
+    """
+    matching = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, Mapping) and feedback_applies_to_hash(artifact, file_hash)
+    ]
+    if not matching:
+        return {}
+    matching.sort(key=lambda a: _feedback_specificity(a))
+    merged: dict[str, Any] = {}
+    for artifact in matching:
+        for field in ("user_confirmed_axes", "user_overrides"):
+            values = artifact.get(field) or {}
+            if isinstance(values, Mapping) and values:
+                merged[field] = {**merged.get(field, {}), **values}
+        deletions = artifact.get("user_deleted_axes") or ()
+        if deletions:
+            merged["user_deleted_axes"] = list(
+                dict.fromkeys([*merged.get("user_deleted_axes", ()), *deletions])
+            )
+        if artifact.get("applied_at_utc"):
+            merged["applied_at_utc"] = artifact["applied_at_utc"]
+    return merged
 
 
 def apply_feedback_at_scan(
