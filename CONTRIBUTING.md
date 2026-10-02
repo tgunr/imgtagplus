@@ -38,7 +38,7 @@ pytest
 ## Scope
 
 - Prefer small, reviewable pull requests.
-- Keep sandbox and local-only safety behavior intact unless a change intentionally revises the spec.
+- Keep local-only safety behavior (CSRF origin checks, rate limits) intact; path-based sandbox restrictions are intentionally removed.
 - Add tests for behavior changes, especially around metadata writing, server validation, and model-selection logic.
 
 ## Pull requests

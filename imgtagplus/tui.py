@@ -37,7 +37,6 @@ from imgtagplus import __version__
 from imgtagplus.cli import (
     _get_server_pid,
     _is_process_running,
-    _load_server_config,
     restart_server_daemon,
     start_server_daemon,
     stop_server_daemon,
@@ -90,10 +89,7 @@ class ServerStatusCard(Static):
             return
         running, url = _server_status()
         if running:
-            cfg = _load_server_config() or {}
-            mode = "Full File Access" if cfg.get("ffsa") else "Sandbox Access"
-            extra = f"  ({cfg['sandbox_dir']})" if cfg.get("sandbox_dir") else ""
-            detail.update(f"[bold green]● Running[/bold green]  {url}  {mode}{extra}")
+            detail.update(f"[bold green]● Running[/bold green]  {url}")
         else:
             detail.update("[bold red]● Stopped[/bold red]")
 
@@ -104,8 +100,8 @@ class DashboardScreen(Screen):
     """Main dashboard — server controls + shortcut menu."""
 
     BINDINGS = [
-        Binding("1", "start_sandbox", show=False),
-        Binding("2", "start_ffsa", show=False),
+        Binding("1", "start_server", show=False),
+        Binding("2", "start_server", show=False),
         Binding("3", "stop_server", show=False),
         Binding("4", "restart_server", show=False),
         Binding("5", "open_tagging", "Tag Images", show=True),
@@ -121,8 +117,7 @@ class DashboardScreen(Screen):
         # Action panel — expands to fill remaining space
         with Vertical(id="action-panel"):
             yield Label("Actions", id="action-title")
-            yield Button("Start Web UI  (Sandbox Access)",  id="btn-action-1", classes="action-btn")
-            yield Button("Start Web UI  (Full File Access)", id="btn-action-2", classes="action-btn")
+            yield Button("Start Web UI Server",             id="btn-action-1", classes="action-btn")
             yield Button("Stop Web UI Server",              id="btn-action-3", classes="action-btn")
             yield Button("Restart Web UI Server",           id="btn-action-4", classes="action-btn")
             yield Rule(id="action-rule")
@@ -136,10 +131,8 @@ class DashboardScreen(Screen):
         # Startup notice if server is already running
         running, url = _server_status()
         if running:
-            cfg = _load_server_config() or {}
-            mode = "Full File Access" if cfg.get("ffsa") else "Sandbox Access"
             self.notify(
-                f"Web UI is already running at {url} ({mode})",
+                f"Web UI is already running at {url}",
                 title="Server detected",
                 timeout=5,
             )
@@ -165,11 +158,8 @@ class DashboardScreen(Screen):
         self._status_card().refresh_status()
         self.notify("Status refreshed", timeout=1.5)
 
-    def action_start_sandbox(self) -> None:
-        self.app.run_worker(self._do_start_sandbox, thread=True)
-
-    def action_start_ffsa(self) -> None:
-        self.app.run_worker(self._do_start_ffsa, thread=True)
+    def action_start_server(self) -> None:
+        self.app.run_worker(self._do_start_server, thread=True)
 
     def action_stop_server(self) -> None:
         self.app.run_worker(self._do_stop, thread=True)
@@ -183,10 +173,7 @@ class DashboardScreen(Screen):
     # ── Mouse / button handlers ───────────────────────────────────────────
 
     @on(Button.Pressed, "#btn-action-1")
-    def _on_btn1(self) -> None: self.action_start_sandbox()
-
-    @on(Button.Pressed, "#btn-action-2")
-    def _on_btn2(self) -> None: self.action_start_ffsa()
+    def _on_btn1(self) -> None: self.action_start_server()
 
     @on(Button.Pressed, "#btn-action-3")
     def _on_btn3(self) -> None: self.action_stop_server()
@@ -199,14 +186,9 @@ class DashboardScreen(Screen):
 
     # ── Worker callbacks ──────────────────────────────────────────────────
 
-    def _do_start_sandbox(self) -> None:
-        self.app.call_from_thread(self.notify, "Starting server (sandbox)…", timeout=2)
-        start_server_daemon(ffsa=False)
-        self.app.call_from_thread(self._status_card().refresh_status)
-
-    def _do_start_ffsa(self) -> None:
-        self.app.call_from_thread(self.notify, "Starting server (full file access)…", timeout=2)
-        start_server_daemon(ffsa=True)
+    def _do_start_server(self) -> None:
+        self.app.call_from_thread(self.notify, "Starting server…", timeout=2)
+        start_server_daemon()
         self.app.call_from_thread(self._status_card().refresh_status)
 
     def _do_stop(self) -> None:

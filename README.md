@@ -129,7 +129,7 @@ When the local web server is running, FastAPI serves interactive API docs at [`/
 
 The main endpoints are:
 
-- `GET /api/browse` for sandbox-aware directory browsing
+- `GET /api/browse` for directory browsing
 - `GET /api/images` for listing image previews and XMP tags in a selected directory
 - `GET /api/image` for same-origin image delivery to the browser lightbox
 - `POST /api/tag` to start a tagging run

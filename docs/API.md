@@ -146,9 +146,7 @@ Query parameter:
 
 Behavior:
 
-- with an empty `path`, the server starts from:
-  - the sandbox root when sandboxing is enabled
-  - the user's home directory when full file system access is enabled
+- with an empty `path`, the server starts from the user's home directory
 - only directories are returned
 - hidden entries are omitted
 - files are not listed
@@ -157,19 +155,19 @@ Success response shape:
 
 ```json
 {
-  "current_path": "/Users/example/sandbox",
+  "current_path": "/Users/example",
   "items": [
     {"name": "..", "path": "/Users/example", "is_dir": true},
-    {"name": "photos", "path": "/Users/example/sandbox/photos", "is_dir": true}
+    {"name": "photos", "path": "/Users/example/photos", "is_dir": true}
   ],
-  "sandbox": true
+  "sandbox": false
 }
 ```
 
 Error responses use standard HTTP status codes:
 
 - `404` — Directory does not exist
-- `403` — Path outside sandbox or permission denied
+- `403` — Permission denied
 - `429` — Rate limit exceeded
 
 ```json
@@ -177,7 +175,7 @@ Error responses use standard HTTP status codes:
 ```
 
 ```json
-{"detail": "Access denied: Path is outside the sandbox"}
+{"detail": "Permission denied reading directory"}
 ```
 
 Notes:
@@ -225,7 +223,6 @@ Possible error responses (standard HTTP status codes):
 
 - `409` — A tagging job is already in progress
 - `400` — Invalid or missing input path
-- `403` — Sandbox violation
 - `429` — Rate limit exceeded
 
 ```json
@@ -240,18 +237,11 @@ Possible error responses (standard HTTP status codes):
 {"detail": "Invalid or non-existent path: /bad/path"}
 ```
 
-Sandbox violations return HTTP 403:
-
-```json
-{"detail": "Access denied: path outside sandbox"}
-```
-
 ### Validation behavior worth noting
 
 - the server acquires the job lock before parsing the body, so concurrent callers see the busy error early
 - numeric values are clamped, not rejected
 - missing or nonexistent `input` returns a JSON error payload instead of a 4xx validation response
-- both `input` and `output_dir` are sandbox-checked in web mode
 
 ### Runtime behavior
 
@@ -368,23 +358,9 @@ Failure:
 
 - HTTP 404 with a simple HTML body when no matching logs exist
 
-## Sandbox behavior
+## File access behavior
 
-Sandboxing only affects the web server flow.
-
-Default behavior:
-
-- `IMGTAGPLUS_FFSA` unset or not equal to `"1"`
-- file browsing starts inside `IMGTAGPLUS_SANDBOX_DIR` or `./sandbox`
-- both browse requests and tagging requests are constrained to that root
-
-Full file system access:
-
-- enabled by `IMGTAGPLUS_FFSA=1`
-- browse root becomes the user's home directory
-- path checks are bypassed
-
-The CLI headless path does not enforce this sandbox; it operates on whichever input path the user passes locally.
+The web server flow has no path restrictions: browse requests start at the user's home directory, and tagging jobs accept whichever `input` / `output_dir` paths the caller provides.
 
 ## Static and docs routes
 

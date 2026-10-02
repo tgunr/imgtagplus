@@ -66,7 +66,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectDirBtn = document.getElementById('select-dir-btn');
     const dirList = document.getElementById('dir-list');
     const currentDirPathSpan = document.getElementById('current-dir-path');
-    const sandboxWarning = document.getElementById('sandbox-warning');
 
     // Output Dir Elements
     const outputToggle = document.getElementById('show-output-dir');
@@ -895,13 +894,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
             currentBrowsePath = data.current_path;
             currentDirPathSpan.textContent = data.current_path;
-            
-            if (data.sandbox) {
-                sandboxWarning.classList.remove('hidden');
-            } else {
-                sandboxWarning.classList.add('hidden');
-            }
-            
+
             dirList.innerHTML = '';
             if (data.items.length === 0) {
                 dirList.innerHTML = '<div class="p-4 text-center text-sm text-muted-foreground">Folder is empty</div>';

@@ -22,12 +22,10 @@ class _ImmediateThread:
 
 @pytest.fixture
 def tagging_client(monkeypatch, tmp_path: Path):
-    sandbox_root = tmp_path / "sandbox"
-    sandbox_root.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(server, "FFSA_ENABLED", False)
-    monkeypatch.setattr(server, "SANDBOX_ROOT", sandbox_root)
     monkeypatch.setattr(server, "log_queue", queue.Queue())
     monkeypatch.setattr(server, "progress_queue", queue.Queue())
     monkeypatch.setattr(server, "_job_lock", threading.Lock())
@@ -42,21 +40,10 @@ def tagging_client(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(server, "app_run", fake_run)
 
-    return TestClient(server.app), sandbox_root, captured
+    return TestClient(server.app), work_dir, captured
 
 
-def test_start_tagging_rejects_input_outside_sandbox(tagging_client, tmp_path: Path) -> None:
-    client, _, _ = tagging_client
-    outside_image = tmp_path / "outside.jpg"
-    outside_image.write_bytes(b"image")
-
-    response = client.post("/api/tag", json={"input": str(outside_image)})
-
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Access denied: path outside sandbox"}
-
-
-def test_start_tagging_invalid_path_does_not_leave_server_busy(tagging_client, tmp_path: Path) -> None:
+def test_start_tagging_invalid_path_does_not_leave_server_busy(tagging_client, tmp_path: Path):
     client, _, _ = tagging_client
     missing_path = tmp_path / "missing"
 
@@ -67,27 +54,9 @@ def test_start_tagging_invalid_path_does_not_leave_server_busy(tagging_client, t
     assert client.get("/api/status").json()["is_processing"] is False
 
 
-def test_start_tagging_rejects_output_dir_outside_sandbox(
-    tagging_client, tmp_path: Path
-) -> None:
-    client, sandbox_root, _ = tagging_client
-    image_path = sandbox_root / "photo.jpg"
-    image_path.write_bytes(b"image")
-    outside_dir = tmp_path / "outside-output"
-    outside_dir.mkdir()
-
-    response = client.post(
-        "/api/tag",
-        json={"input": str(image_path), "output_dir": str(outside_dir)},
-    )
-
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Access denied: path outside sandbox"}
-
-
 def test_start_tagging_clamps_threshold_and_max_tags(tagging_client) -> None:
-    client, sandbox_root, captured = tagging_client
-    image_path = sandbox_root / "photo.jpg"
+    client, work_dir, captured = tagging_client
+    image_path = work_dir / "photo.jpg"
     image_path.write_bytes(b"image")
 
     response = client.post(
@@ -104,8 +73,8 @@ def test_start_tagging_clamps_threshold_and_max_tags(tagging_client) -> None:
 
 
 def test_start_tagging_passes_manual_accelerator(tagging_client) -> None:
-    client, sandbox_root, captured = tagging_client
-    image_path = sandbox_root / "photo.jpg"
+    client, work_dir, captured = tagging_client
+    image_path = work_dir / "photo.jpg"
     image_path.write_bytes(b"image")
 
     response = client.post(
@@ -166,8 +135,8 @@ def test_status_reports_runtime_details_when_idle(tagging_client) -> None:
 
 
 def test_done_event_reports_empty_scan_when_no_images_processed(tagging_client) -> None:
-    client, sandbox_root, _ = tagging_client
-    image_path = sandbox_root / "photo.jpg"
+    client, work_dir, _ = tagging_client
+    image_path = work_dir / "photo.jpg"
     image_path.write_bytes(b"image")
 
     response = client.post("/api/tag", json={"input": str(image_path)})
@@ -184,8 +153,8 @@ def test_done_event_reports_empty_scan_when_no_images_processed(tagging_client) 
 
 
 def test_done_event_reports_failed_when_worker_crashes(tagging_client, monkeypatch) -> None:
-    client, sandbox_root, _ = tagging_client
-    image_path = sandbox_root / "photo.jpg"
+    client, work_dir, _ = tagging_client
+    image_path = work_dir / "photo.jpg"
     image_path.write_bytes(b"image")
 
     def crash_run(args, progress_callback=None):
@@ -213,8 +182,8 @@ def test_done_event_reports_failed_when_worker_crashes(tagging_client, monkeypat
 
 
 def test_done_event_reports_failed_when_worker_returns_nonzero(tagging_client, monkeypatch) -> None:
-    client, sandbox_root, _ = tagging_client
-    image_path = sandbox_root / "photo.jpg"
+    client, work_dir, _ = tagging_client
+    image_path = work_dir / "photo.jpg"
     image_path.write_bytes(b"image")
 
     def fail_run(args, progress_callback=None):

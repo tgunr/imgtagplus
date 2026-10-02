@@ -94,7 +94,7 @@ When the scanner finds no supported images at the input path:
 
 When `imgtagplus` runs with no arguments, `tui.py` launches a Textual terminal UI (`ImgTagPlusApp`) that can:
 
-- start the web server in sandbox mode or with full file system access
+- start the web server
 - stop or restart the existing server daemon
 - open a tagging form (`TaggingScreen`) and run the same `imgtagplus.app.run()` pipeline headlessly, with a live progress view
 
@@ -206,15 +206,12 @@ The resulting summary is appended to the end-of-run output shown in the CLI and 
 
 The web server also adds an extra handler so application logs appear in the browser's live stream.
 
-### Sandboxing and path boundaries
+### File access and path boundaries
 
 The browser file picker is server-mediated; it does not read the filesystem directly.
 
-- default mode: sandboxed
-- sandbox root: `IMGTAGPLUS_SANDBOX_DIR` or `./sandbox`
-- unrestricted mode: set `IMGTAGPLUS_FFSA=1`
-
-Both `input` and `output_dir` are checked against the sandbox boundary before a web job starts.
+- browsing starts at the user's home directory and can navigate anywhere the server process can read
+- `input` and `output_dir` for tagging jobs are not path-restricted
 
 ### Persistence and caches
 
@@ -239,7 +236,6 @@ Some current design choices are deliberate:
 
 - one shared pipeline for CLI and web requests keeps behavior aligned
 - local-only web serving avoids a separate API/auth layer
-- sandbox enforcement lives in the server, not in the frontend
 - model recommendations are advisory; unsupported models may still appear, but the UI flags them
 
 For exact endpoint contracts, see `docs/API.md`. For model-specific runtime behavior, see `docs/MODELS.md`.

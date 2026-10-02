@@ -26,9 +26,25 @@ from fastapi.staticfiles import StaticFiles
 
 from imgtagplus.app import run as app_run
 from imgtagplus.logger import DEFAULT_LOG_DIR
-from imgtagplus.metadata import read_xmp_tags, sidecar_path_for_image
+from imgtagplus.metadata import (
+    compute_file_hash,
+    read_tag_sidecar,
+    read_xmp_tags,
+    sidecar_path_for_image,
+    write_tag_sidecar,
+)
 from imgtagplus.profiler import get_model_recommendations, get_profiler_summary
 from imgtagplus.scanner import IMAGE_EXTENSIONS, scan
+from imgtagplus.tags import (
+    TaxonomyError,
+    build_feedback_artifact,
+    make_override,
+    make_user_tag,
+    merge_tags,
+    normalize_key,
+    taxonomy_summary,
+    validate_axis_key,
+)
 
 
 class JobCancelledError(BaseException):
@@ -193,22 +209,6 @@ async def index():
     with open(index_file, "r") as f:
         return f.read()
 
-FFSA_ENABLED = os.environ.get("IMGTAGPLUS_FFSA") == "1"
-SANDBOX_ROOT = Path(os.environ.get("IMGTAGPLUS_SANDBOX_DIR", Path(__file__).parent / "sandbox"))
-SANDBOX_ROOT.mkdir(exist_ok=True)
-
-
-def _assert_sandbox(path: Path | None) -> None:
-    """Reject paths outside the sandbox unless unrestricted browsing is enabled."""
-    if path is None or FFSA_ENABLED:
-        return
-
-    try:
-        path.resolve().relative_to(SANDBOX_ROOT.resolve())
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail="Access denied: path outside sandbox") from exc
-
-
 def _serialize_image_record(image_path: Path) -> dict[str, object]:
     """Build a frontend-friendly image record for the viewer grid."""
     stat = image_path.stat()
@@ -232,21 +232,15 @@ async def browse_directory(request: Request, path: str = ""):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     if not path:
-        current_path = Path.home() if FFSA_ENABLED else SANDBOX_ROOT
+        current_path = Path.home()
     else:
         current_path = Path(path)
 
     if not current_path.exists() or not current_path.is_dir():
         raise HTTPException(status_code=404, detail="Directory does not exist")
 
-    if not FFSA_ENABLED:
-        try:
-            current_path.resolve().relative_to(SANDBOX_ROOT.resolve())
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Access denied: Path is outside the sandbox")
-
     items = []
-    if current_path != (Path.home() if FFSA_ENABLED else SANDBOX_ROOT) and current_path != Path(current_path.root):
+    if current_path != Path.home() and current_path != Path(current_path.root):
         items.append({"name": "..", "path": str(current_path.parent), "is_dir": True})
 
     try:
@@ -260,7 +254,7 @@ async def browse_directory(request: Request, path: str = ""):
     return {
         "current_path": str(current_path),
         "items": items,
-        "sandbox": not FFSA_ENABLED,
+        "sandbox": False,
     }
 
 
@@ -286,8 +280,6 @@ async def list_images(
     if not directory_path.is_dir():
         raise HTTPException(status_code=400, detail="Path must be a directory")
 
-    _assert_sandbox(directory_path)
-
     safe_offset = max(0, offset)
     safe_limit = max(1, min(120, limit))
     images = scan(directory_path, recursive=recursive)
@@ -301,7 +293,6 @@ async def list_images(
         "limit": safe_limit,
         "has_more": safe_offset + safe_limit < len(images),
         "recursive": recursive,
-        "sandbox": not FFSA_ENABLED,
     }
 
 
@@ -319,14 +310,212 @@ async def get_image_file(request: Request, path: str):
     if not image_path.exists() or not image_path.is_file():
         raise HTTPException(status_code=404, detail="Image does not exist")
 
-    _assert_sandbox(image_path)
-
     resolved_path = image_path.resolve()
     if resolved_path.suffix.lower() not in IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported image type")
 
     media_type = mimetypes.guess_type(resolved_path.name)[0] or "application/octet-stream"
     return FileResponse(path=resolved_path, filename=resolved_path.name, media_type=media_type)
+
+
+# ---------------------------------------------------------------------------
+# Taxonomy / editable-tag API
+# ---------------------------------------------------------------------------
+
+def _require_image_file(path: str | None) -> Path:
+    """Validate a tag-API ``path`` parameter and return the resolved image."""
+    if not path:
+        raise HTTPException(status_code=400, detail="Image path is required")
+    image_path = Path(path)
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image does not exist")
+    return image_path.resolve()
+
+
+def _load_tag_state(image_path: Path) -> dict:
+    """Read the sidecar, applying stale-content rules.
+
+    When the image bytes changed since the sidecar was written, derived tags
+    and deletions are dropped (they describe the old content) but user tags,
+    overrides, and feedback persist across content changes.
+    """
+    from imgtagplus.metadata import _get_image_lock
+
+    with _get_image_lock(image_path):
+        sidecar = read_tag_sidecar(image_path)
+        stale = (
+            bool(sidecar.get("file_hash"))
+            and sidecar.get("file_hash") != compute_file_hash(image_path)
+        )
+        if stale:
+            sidecar["derived_tags"] = {}
+            sidecar["user_deletions"] = []
+            sidecar["file_hash"] = compute_file_hash(image_path)
+        elif not sidecar.get("file_hash"):
+            sidecar["file_hash"] = compute_file_hash(image_path)
+        return sidecar
+
+
+def _save_tag_state(image_path: Path, sidecar: dict) -> dict:
+    """Write the sidecar under the per-image lock and return the merged view."""
+    from imgtagplus.metadata import _get_image_lock
+
+    with _get_image_lock(image_path):
+        written = write_tag_sidecar(
+            image_path,
+            derived_tags=sidecar.get("derived_tags"),
+            user_tags=sidecar.get("user_tags"),
+            user_deletions=sidecar.get("user_deletions"),
+            user_overrides=sidecar.get("user_overrides"),
+            feedback=sidecar.get("feedback_for_future_scans"),
+        )
+    return merge_tags(written)
+
+
+def _tag_view(image_path: Path) -> dict:
+    """Merged effective-tag view for one image, including sidecar internals."""
+    sidecar = _load_tag_state(image_path)
+    merged = merge_tags(sidecar)
+    merged["file_hash"] = sidecar.get("file_hash")
+    merged["sidecar_path"] = str(sidecar_path_for_image(image_path))
+    return merged
+
+
+@app.get("/api/taxonomy")
+async def get_taxonomy(request: Request):
+    """Full axes/keys/labels/precedence summary for building the editor UI."""
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 100):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    return {"ok": True, "taxonomy": taxonomy_summary()}
+
+
+@app.get("/api/tags")
+async def get_tags(request: Request, path: str):
+    """Effective tags for one image: axes, provenance, deletions, overrides."""
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 200):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    image_path = _require_image_file(path)
+    return {"ok": True, "tags": _tag_view(image_path)}
+
+
+async def _mutate_tags(request: Request, body: dict, mutate) -> dict:
+    """Shared write path: validate, load, mutate, save. ``mutate`` raises
+    TaxonomyError (→ 400) or HTTPException for contract violations."""
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    image_path = _require_image_file(body.get("path"))
+    sidecar = _load_tag_state(image_path)
+    try:
+        mutate(sidecar, body)
+    except TaxonomyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    merged = _save_tag_state(image_path, sidecar)
+    return {"ok": True, "tags": merged}
+
+
+@app.put("/api/tags/user")
+async def put_user_tag(request: Request):
+    """Assign a user tag on an axis. Body: {path, axis, key}."""
+    body = await request.json()
+
+    def mutate(sidecar: dict, payload: dict) -> None:
+        axis = validate_axis_key(payload.get("axis", ""))
+        record = make_user_tag(axis, payload.get("key", ""))
+        user_tags = dict(sidecar.get("user_tags", {}))
+        user_tags[axis] = record
+        # A fresh user tag supersedes a deletion of the same axis.
+        deletions = [
+            d for d in sidecar.get("user_deletions", [])
+            if normalize_key(d.get("axis")) != axis
+        ]
+        sidecar["user_tags"] = user_tags
+        sidecar["user_deletions"] = deletions
+
+    return await _mutate_tags(request, body, mutate)
+
+
+@app.put("/api/tags/override")
+async def put_override(request: Request):
+    """Override the current value of an axis. Body: {path, axis, new, reason?}.
+
+    The axis must have a current value (derived or user) to override — 400
+    otherwise.
+    """
+    body = await request.json()
+
+    def mutate(sidecar: dict, payload: dict) -> None:
+        axis = validate_axis_key(payload.get("axis", ""))
+        current = merge_tags(sidecar)["axes"].get(axis)
+        if not current or not current.get("key"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"axis {axis} has no current value to override",
+            )
+        record = make_override(
+            axis, current.get("key"), payload.get("new"), reason=payload.get("reason", "")
+        )
+        overrides = dict(sidecar.get("user_overrides", {}))
+        overrides[axis] = record
+        sidecar["user_overrides"] = overrides
+
+    return await _mutate_tags(request, body, mutate)
+
+
+@app.put("/api/tags/delete")
+async def delete_tag(request: Request):
+    """Delete the tag on an axis. Body: {path, axis}.
+
+    The axis must have a current value; the deletion persists in the sidecar
+    and suppresses re-derived tags at the next scan.
+    """
+    body = await request.json()
+
+    def mutate(sidecar: dict, payload: dict) -> None:
+        axis = validate_axis_key(payload.get("axis", ""))
+        current = merge_tags(sidecar)["axes"].get(axis)
+        if not current or not current.get("key"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"axis {axis} has no current value to delete",
+            )
+        deletions = list(sidecar.get("user_deletions", []))
+        deletions.append(
+            build_feedback_artifact(
+                {
+                    "axis": axis,
+                    "key": current.get("key"),
+                    "label": current.get("label", ""),
+                    "source": current.get("source", ""),
+                }
+            )
+        )
+        sidecar["user_deletions"] = deletions
+
+    return await _mutate_tags(request, body, mutate)
+
+
+@app.post("/api/tags/reset-deletion")
+async def reset_deletion(request: Request):
+    """Undo a deletion so the analyzer can re-propose a tag. Body: {path, axis}."""
+    body = await request.json()
+
+    def mutate(sidecar: dict, payload: dict) -> None:
+        axis = validate_axis_key(payload.get("axis", ""))
+        before = len(sidecar.get("user_deletions", []))
+        sidecar["user_deletions"] = [
+            d for d in sidecar.get("user_deletions", [])
+            if normalize_key(d.get("axis")) != axis
+        ]
+        if len(sidecar["user_deletions"]) == before:
+            raise HTTPException(
+                status_code=400,
+                detail=f"axis {axis} has no deletion to reset",
+            )
+
+    return await _mutate_tags(request, body, mutate)
 
 
 @app.get("/api/models")
@@ -390,9 +579,6 @@ async def start_tagging(request: Request):
     input_path = Path(input_path_raw)
     if not input_path.exists():
         raise HTTPException(status_code=400, detail=f"Invalid or non-existent path: {input_path}")
-
-    _assert_sandbox(input_path)
-    _assert_sandbox(output_dir)
 
     if not _job_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A tagging job is already in progress")

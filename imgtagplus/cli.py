@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import subprocess
@@ -20,7 +19,6 @@ from imgtagplus import __version__
 
 _PID_SUFFIX = str(os.getuid()) if hasattr(os, "getuid") else "default"
 PID_FILE = Path(tempfile.gettempdir()) / f"imgtagplus_server_{_PID_SUFFIX}.pid"
-STATE_FILE = Path(tempfile.gettempdir()) / f"imgtagplus_server_{_PID_SUFFIX}.json"
 
 def _get_server_pid() -> int | None:
     """Return the last recorded daemon PID, or None if the pid file is missing/invalid."""
@@ -30,41 +28,6 @@ def _get_server_pid() -> int | None:
         except ValueError:
             return None
     return None
-
-
-def _normalize_server_config(ffsa: bool = False, sandbox_dir: str | None = None) -> dict[str, object]:
-    """Return a stable server-config payload for persistence and comparisons."""
-    return {
-        "ffsa": bool(ffsa),
-        "sandbox_dir": str(sandbox_dir) if sandbox_dir else None,
-    }
-
-
-def _load_server_config() -> dict[str, object] | None:
-    """Return the persisted server mode, if present and valid."""
-    if not STATE_FILE.exists():
-        return None
-
-    try:
-        payload = json.loads(STATE_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-    return _normalize_server_config(
-        ffsa=bool(payload.get("ffsa", False)),
-        sandbox_dir=payload.get("sandbox_dir"),
-    )
-
-
-def _save_server_config(ffsa: bool = False, sandbox_dir: str | None = None) -> None:
-    """Persist the active server mode so restart operations can reuse it."""
-    STATE_FILE.write_text(json.dumps(_normalize_server_config(ffsa=ffsa, sandbox_dir=sandbox_dir)))
-
-
-def _clear_server_config() -> None:
-    """Remove any persisted server mode state."""
-    if STATE_FILE.exists():
-        STATE_FILE.unlink()
 
 
 def _is_process_running(pid: int) -> bool:
@@ -97,20 +60,13 @@ def _wait_for_server_ready(url: str, attempts: int = 20, delay: float = 0.25) ->
             time.sleep(delay)
     return False
 
-def start_server_daemon(ffsa: bool = False, sandbox_dir: str | None = None) -> None:
+def start_server_daemon() -> None:
     """Spawn the Web UI server in a detached process and persist its PID for later control."""
     pid = _get_server_pid()
-    desired_config = _normalize_server_config(ffsa=ffsa, sandbox_dir=sandbox_dir)
     if pid and _is_process_running(pid):
-        current_config = _load_server_config()
-        if current_config == desired_config:
-            print(f"Server is already running (PID {pid}).")
-            return
+        print(f"Server is already running (PID {pid}).")
+        return
 
-        print("Server is already running in a different mode. Restarting with the selected mode...")
-        stop_server_daemon()
-        time.sleep(1)
-        
     print("Starting ImgTagPlus Web UI...")
     
     # We run the uvicorn server via our server module entrypoint
@@ -123,10 +79,6 @@ def start_server_daemon(ffsa: bool = False, sandbox_dir: str | None = None) -> N
     # Start process
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).parent.parent)
-    if ffsa:
-        env["IMGTAGPLUS_FFSA"] = "1"
-    if sandbox_dir:
-        env["IMGTAGPLUS_SANDBOX_DIR"] = str(sandbox_dir)
     
     # We use python -m uvicorn or directly python server.py
     proc = subprocess.Popen(
@@ -139,7 +91,6 @@ def start_server_daemon(ffsa: bool = False, sandbox_dir: str | None = None) -> N
     
     # Persist the PID immediately so later stop/restart commands can recover even across shells.
     PID_FILE.write_text(str(proc.pid))
-    _save_server_config(ffsa=ffsa, sandbox_dir=sandbox_dir)
     if _wait_for_server_ready("http://127.0.0.1:5000/health"):
         print(f"Server started on http://127.0.0.1:5000 (PID {proc.pid})")
         return
@@ -153,14 +104,12 @@ def stop_server_daemon() -> None:
         print("Server is not currently running.")
         if PID_FILE.exists():
             PID_FILE.unlink()
-        _clear_server_config()
         return
 
     if not _is_imgtagplus_server_process(pid):
         print("PID file does not point to an ImgTagPlus server. Refusing to stop it.")
         if PID_FILE.exists():
             PID_FILE.unlink()
-        _clear_server_config()
         return
 
     print(f"Stopping Server (PID {pid})...")
@@ -175,17 +124,13 @@ def stop_server_daemon() -> None:
         
     if PID_FILE.exists():
         PID_FILE.unlink()
-    _clear_server_config()
     print("Server stopped.")
 
-def restart_server_daemon(ffsa: bool | None = None, sandbox_dir: str | None = None) -> None:
+def restart_server_daemon() -> None:
     """Bounce the background server through the same guarded stop/start path used elsewhere."""
-    saved_config = _load_server_config() or _normalize_server_config()
-    target_ffsa = bool(saved_config["ffsa"]) if ffsa is None else ffsa
-    target_sandbox_dir = saved_config["sandbox_dir"] if sandbox_dir is None else sandbox_dir
     stop_server_daemon()
     time.sleep(1)
-    start_server_daemon(ffsa=target_ffsa, sandbox_dir=target_sandbox_dir)
+    start_server_daemon()
 
 def print_menu():
     print("\n" + "="*40)
@@ -199,15 +144,9 @@ def print_menu():
     print(f"  Web UI Status: {status}")
     if is_running:
         print("  URL: http://127.0.0.1:5000")
-        server_config = _load_server_config() or _normalize_server_config()
-        mode_label = "Full File Access" if server_config["ffsa"] else "Sandbox Access"
-        print(f"  Mode: {mode_label}")
-        if server_config["sandbox_dir"]:
-            print(f"  Sandbox Dir: {server_config['sandbox_dir']}")
         
     print("-" * 40)
-    print("  [1] Start Web UI Server (Sandbox Access)")
-    print("  [2] Start Web UI Server (Full File Access)")
+    print("  [1] Start Web UI Server")
     print("  [3] Stop Web UI Server")
     print("  [4] Restart Web UI Server")
     print("  [5] Run Tagging Task (Headless Prompt)")
@@ -225,9 +164,9 @@ def run_interactive_menu():
         choice = input("\nSelect an option: ").strip()
         
         if choice == '1':
-            start_server_daemon(ffsa=False)
+            start_server_daemon()
         elif choice == '2':
-            start_server_daemon(ffsa=True)
+            start_server_daemon()
         elif choice == '3':
             stop_server_daemon()
         elif choice == '4':
@@ -302,19 +241,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start-server", action="store_true", help="Start the Web UI server in the background")
     p.add_argument("--stop-server", action="store_true", help="Stop the Web UI server")
     p.add_argument("--restart-server", action="store_true", help="Restart the Web UI server")
-    p.add_argument(
-        "--full-file-system-access",
-        "--ffsa",
-        action="store_true",
-        help="Allow Web UI file picker to access the entire file system",
-    )
-    p.add_argument(
-        "--sandbox",
-        action="store_true",
-        default=True,
-        help="Run Web UI in sandbox mode (default). File picker restricted to sandbox directory.",
-    )
-    p.add_argument("--sandbox-dir", type=Path, default=None, help="Custom sandbox directory path (default: ./sandbox)")
 
     # ── Input / Output (Headless) ──────────────────────────────────────────
     p.add_argument(
@@ -450,19 +376,13 @@ def main(argv: list[str] | None = None) -> None:
 
     # Server flags are handled first so they never fall through into a tagging run.
     if args.start_server:
-        start_server_daemon(
-            ffsa=args.full_file_system_access,
-            sandbox_dir=str(args.sandbox_dir) if args.sandbox_dir else None
-        )
+        start_server_daemon()
         sys.exit(0)
     elif args.stop_server:
         stop_server_daemon()
         sys.exit(0)
     elif args.restart_server:
-        restart_server_daemon(
-            ffsa=True if args.full_file_system_access else None,
-            sandbox_dir=str(args.sandbox_dir) if args.sandbox_dir else None,
-        )
+        restart_server_daemon()
         sys.exit(0)
 
     # Everything else is treated as a headless tagging invocation.

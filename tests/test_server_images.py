@@ -11,19 +11,17 @@ from imgtagplus.metadata import write_xmp
 
 @pytest.fixture
 def image_client(monkeypatch, tmp_path: Path):
-    sandbox_root = tmp_path / "sandbox"
-    sandbox_root.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
 
-    monkeypatch.setattr(server, "FFSA_ENABLED", False)
-    monkeypatch.setattr(server, "SANDBOX_ROOT", sandbox_root)
     monkeypatch.setattr(server, "_check_rate_limit", lambda *a: True)
 
-    return TestClient(server.app), sandbox_root
+    return TestClient(server.app), work_dir
 
 
 def test_list_images_returns_supported_images_and_tags(image_client) -> None:
-    client, sandbox_root = image_client
-    photos_dir = sandbox_root / "photos"
+    client, work_dir = image_client
+    photos_dir = work_dir / "photos"
     photos_dir.mkdir()
 
     tagged_image = photos_dir / "alpha.jpg"
@@ -48,8 +46,8 @@ def test_list_images_returns_supported_images_and_tags(image_client) -> None:
 
 
 def test_list_images_supports_pagination(image_client) -> None:
-    client, sandbox_root = image_client
-    photos_dir = sandbox_root / "photos"
+    client, work_dir = image_client
+    photos_dir = work_dir / "photos"
     photos_dir.mkdir()
 
     for name in ("alpha.jpg", "beta.jpg", "gamma.jpg"):
@@ -69,21 +67,9 @@ def test_list_images_supports_pagination(image_client) -> None:
     assert [item["name"] for item in payload["images"]] == ["beta.jpg"]
 
 
-def test_list_images_rejects_directory_outside_sandbox(image_client, tmp_path: Path) -> None:
-    client, _ = image_client
-    outside_dir = tmp_path / "outside"
-    outside_dir.mkdir()
-    (outside_dir / "photo.jpg").write_bytes(b"image")
-
-    response = client.get("/api/images", params={"path": str(outside_dir)})
-
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Access denied: path outside sandbox"}
-
-
 def test_get_image_file_serves_supported_image(image_client) -> None:
-    client, sandbox_root = image_client
-    image_path = sandbox_root / "photo.jpg"
+    client, work_dir = image_client
+    image_path = work_dir / "photo.jpg"
     image_path.write_bytes(b"binary-image")
 
     response = client.get("/api/image", params={"path": str(image_path)})
@@ -94,8 +80,8 @@ def test_get_image_file_serves_supported_image(image_client) -> None:
 
 
 def test_get_image_file_rejects_non_image_paths(image_client) -> None:
-    client, sandbox_root = image_client
-    text_path = sandbox_root / "notes.txt"
+    client, work_dir = image_client
+    text_path = work_dir / "notes.txt"
     text_path.write_text("nope", encoding="utf-8")
 
     response = client.get("/api/image", params={"path": str(text_path)})

@@ -59,16 +59,11 @@ Behavior:
 - startup is not reported as successful until `http://127.0.0.1:5000/health` answers with HTTP 200
 - stop logic validates that the stored PID still looks like an ImgTagPlus server before signaling it
 
-## Sandbox controls
+## File access
 
-Web UI path access is controlled by environment variables:
+The web UI has no path restrictions: browsing starts at the user's home directory, and tagging jobs accept any local path the server process can read.
 
-- `IMGTAGPLUS_FFSA=1` enables full file system access
-- `IMGTAGPLUS_SANDBOX_DIR=/path/to/root` sets the sandbox root when sandboxing is active
-
-Default behavior is sandboxed access rooted at `./sandbox`.
-
-Headless CLI runs are local and do not apply this server sandbox layer.
+Headless CLI runs likewise operate on whichever input path the user passes locally.
 
 ## Logging
 
@@ -111,7 +106,7 @@ Exceeding a limit returns HTTP 429. The limits are in-memory and reset when the 
 
 ## Environment files
 
-Environment variables (e.g. `IMGTAGPLUS_FFSA`, `IMGTAGPLUS_SANDBOX_DIR`) can be set in `.env` files. The `.gitignore` excludes `.env*` patterns to prevent accidentally committing secrets or local overrides.
+Environment variables can be set in `.env` files. The `.gitignore` excludes `.env*` patterns to prevent accidentally committing secrets or local overrides.
 
 ## Validation notes
 

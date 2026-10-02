@@ -8,7 +8,7 @@ ImgTagPlus is a local-first image-tagging tool that scans images on disk, runs a
 
 - Headless CLI runs against a file or directory.
 - Local web UI runs on `127.0.0.1:5000`.
-- The web UI defaults to sandboxed browsing unless full file system access is explicitly enabled.
+- The web UI browses without sandbox restrictions; server-side browse and tag requests accept any path the server process can read.
 
 ## Input behavior
 
@@ -16,7 +16,7 @@ ImgTagPlus is a local-first image-tagging tool that scans images on disk, runs a
 - A single image path processes one file.
 - A directory path scans either one level or recursively depending on `--recursive`.
 - Missing paths are rejected before processing starts.
-- In sandbox mode, server-side browse and tag requests must stay within the configured sandbox root.
+- Server-side browse and tag requests are not path-restricted.
 
 ## Tagging behavior
 
@@ -39,7 +39,7 @@ ImgTagPlus is a local-first image-tagging tool that scans images on disk, runs a
 ## Viewer behavior
 
 - The web UI includes a viewer mode for browsing a selected directory of images.
-- Viewer browsing reuses the existing sandbox-aware directory picker.
+- Viewer browsing reuses the existing server-mediated directory picker.
 - The viewer lists supported image files from the selected directory and can optionally include subdirectories recursively.
 - The viewer supports both grid and list preview modes for the loaded files.
 - The viewer reads tags from `.xmp` sidecar files located next to each image.
@@ -66,7 +66,7 @@ ImgTagPlus is a local-first image-tagging tool that scans images on disk, runs a
 
 - Headless CLI returns a non-zero exit code when scanning or model loading fails.
 - Per-image processing failures can continue or abort depending on CLI flags and interactive choices.
-- The web server returns explicit error responses for invalid paths or sandbox violations.
+- The web server returns explicit error responses for invalid paths.
 
 ## Operational behavior
 

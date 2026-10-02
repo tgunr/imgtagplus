@@ -3,14 +3,24 @@
 Generates Adobe-compatible XMP sidecar files (``.xmp``) that store
 keywords in the ``dc:subject`` field.  Recognised by Lightroom, Bridge,
 Darktable, digiKam, XnView, and virtually all DAM systems.
+
+Also owns the taxonomy JSON sidecar (``.imgtagplus.json``) that carries
+the analyzer's ``derived_tags`` alongside human edits — user tags,
+deletions, overrides, and the ``feedback_for_future_scans`` artifact.
+The JSON sidecar is deliberately separate from the XMP file so DAM
+software never sees internal bookkeeping.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -146,3 +156,127 @@ def _read_existing_tags(xmp_path: Path) -> set[str]:
     except ET.ParseError:
         log.warning("Could not parse existing XMP file: %s", xmp_path)
         return set()
+
+
+# ---------------------------------------------------------------------------
+# Taxonomy JSON sidecar (.imgtagplus.json)
+# ---------------------------------------------------------------------------
+
+#: Sidecar filename, stored next to the image (dotfile, invisible in DAM UIs).
+TAG_SIDECAR_SUFFIX = ".imgtagplus.json"
+
+#: Keys this module owns inside the sidecar.  Any other key found in an
+#: existing sidecar file is preserved verbatim on rewrite (read-modify-write).
+_OWNED_SIDECAR_KEYS = (
+    "schema_version",
+    "file_hash",
+    "filename",
+    "derived_tags",
+    "user_tags",
+    "user_deletions",
+    "user_overrides",
+    "feedback_for_future_scans",
+)
+
+
+def tag_sidecar_path_for_image(image_path: Path, output_dir: Path | None = None) -> Path:
+    """Return the taxonomy JSON sidecar path for *image_path*.
+
+    ``photo.png`` → ``photo.png.imgtagplus.json`` in the same directory
+    (or *output_dir* when given), so multiple images differing only by
+    extension never collide.
+    """
+    base_dir = output_dir if output_dir is not None else image_path.parent
+    return base_dir / f"{image_path.name}{TAG_SIDECAR_SUFFIX}"
+
+
+def compute_file_hash(image_path: Path) -> str:
+    """Return the SHA-256 hex digest of *image_path*'s bytes."""
+    digest = hashlib.sha256()
+    with image_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_tag_sidecar(image_path: Path, output_dir: Path | None = None) -> dict[str, Any]:
+    """Read the taxonomy sidecar for *image_path*.
+
+    Missing or unreadable sidecars return ``{}`` — callers treat absent
+    bookkeeping the same way the analyzer treats an unclassifiable image.
+    A corrupt JSON body logs a warning and returns ``{}`` rather than
+    crashing a scan.
+    """
+    sidecar = tag_sidecar_path_for_image(image_path, output_dir=output_dir)
+    if not sidecar.exists():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not read taxonomy sidecar %s: %s", sidecar, exc)
+        return {}
+    if not isinstance(data, dict):
+        log.warning("Taxonomy sidecar %s is not a JSON object; ignoring", sidecar)
+        return {}
+    return data
+
+
+def write_tag_sidecar(
+    image_path: Path,
+    *,
+    derived_tags: Mapping[str, Any] | None = None,
+    user_tags: Mapping[str, Any] | None = None,
+    user_deletions: Sequence[str] | None = None,
+    user_overrides: Mapping[str, Any] | None = None,
+    feedback: Mapping[str, Any] | None = None,
+    output_dir: Path | None = None,
+    file_hash: str | None = None,
+    merge: bool = True,
+) -> Path:
+    """Create or update the taxonomy JSON sidecar for *image_path*.
+
+    With ``merge=True`` (default) the write is a read-modify-write: unknown
+    keys already in the file survive, and only the taxonomy-owned keys are
+    updated.  The file is written atomically (temp file + ``os.replace``)
+    so a crash mid-write cannot truncate an existing sidecar.
+    """
+    sidecar = tag_sidecar_path_for_image(image_path, output_dir=output_dir)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict[str, Any] = {}
+    if merge and sidecar.exists():
+        existing = read_tag_sidecar(image_path, output_dir=output_dir)
+
+    updates: dict[str, Any] = {
+        "schema_version": 1,
+        "file_hash": file_hash if file_hash is not None else existing.get("file_hash"),
+        "filename": image_path.name,
+        "derived_tags": dict(derived_tags) if derived_tags is not None else existing.get("derived_tags", {}),
+        "user_tags": dict(user_tags) if user_tags is not None else existing.get("user_tags", {}),
+        "user_deletions": list(user_deletions) if user_deletions is not None else existing.get("user_deletions", []),
+        "user_overrides": dict(user_overrides) if user_overrides is not None else existing.get("user_overrides", {}),
+        "feedback_for_future_scans": dict(feedback) if feedback is not None else existing.get("feedback_for_future_scans", {}),
+    }
+
+    payload = dict(existing)
+    for key in _OWNED_SIDECAR_KEYS:
+        payload.pop(key, None)
+    payload.update(updates)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(sidecar.parent), prefix=".imgtagplus-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp_name, sidecar)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    log.debug("Wrote taxonomy sidecar %s", sidecar)
+    return sidecar
+
