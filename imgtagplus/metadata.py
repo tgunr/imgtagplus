@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -156,6 +157,38 @@ def _read_existing_tags(xmp_path: Path) -> set[str]:
     except ET.ParseError:
         log.warning("Could not parse existing XMP file: %s", xmp_path)
         return set()
+
+
+# ---------------------------------------------------------------------------
+# Per-image serialization
+# ---------------------------------------------------------------------------
+
+#: Guards ``_IMAGE_LOCKS`` itself (not the per-image locks).
+_IMAGE_LOCKS_GUARD = threading.Lock()
+
+#: One re-entrant lock per resolved image path, so a tag mutation and a
+#: concurrent write for the same image never interleave a read-modify-write
+#: on the sidecar.  RLock because the server's load and save paths both
+#: acquire it for the same image within one request.
+_IMAGE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _get_image_lock(image_path: Path) -> threading.RLock:
+    """Return the re-entrant lock associated with *image_path*.
+
+    Keyed on the resolved path so symlinked or relative spellings of the
+    same image share one lock.  Distinct images never contend.
+    """
+    try:
+        key = str(image_path.resolve())
+    except OSError:  # pragma: no cover - unresolvable path
+        key = str(image_path)
+    with _IMAGE_LOCKS_GUARD:
+        lock = _IMAGE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _IMAGE_LOCKS[key] = lock
+        return lock
 
 
 # ---------------------------------------------------------------------------

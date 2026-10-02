@@ -351,6 +351,27 @@ def make_user_tag(
     }
 
 
+def make_deletion(
+    axis: str,
+    key: Any = None,
+    *,
+    set_at_utc: str | None = None,
+) -> dict[str, Any]:
+    """Build a validated deletion record for ``axis``.
+
+    A deletion records which axis a human removed and what it was holding at
+    the time, so the UI can offer "undo" with the original value.  ``key`` is
+    optional because an axis may be deleted before any value existed.
+    """
+    canonical_axis = validate_axis_key(axis)
+    old_key = normalize_key(key) if key else None
+    return {
+        "axis": canonical_axis,
+        "key": old_key,
+        "set_at_utc": set_at_utc or _utc_now_iso(),
+    }
+
+
 def make_override(
     axis: str,
     old: Any,
@@ -374,6 +395,25 @@ def make_override(
         "reason": str(reason or ""),
         "set_at_utc": set_at_utc or _utc_now_iso(),
     }
+
+
+def _deletion_axis(entry: Any) -> str | None:
+    """Return the canonical axis named by a ``user_deletions`` entry, or ``None``.
+
+    Accepts both shapes seen in the wild: a bare axis string, and the
+    ``{"axis", "key", "set_at_utc"}`` record written by the delete endpoint.
+    Returns the *canonical* (lowercase) axis so it compares equal to the names
+    in ``AXES``; unrecognised entries return ``None`` and are discarded by
+    callers rather than raising inside a merge.
+    """
+    if isinstance(entry, Mapping):
+        entry = entry.get("axis")
+    if not entry:
+        return None
+    try:
+        return validate_axis_key(entry)
+    except TaxonomyError:
+        return None
 
 
 def merge_tags(
@@ -400,7 +440,8 @@ def merge_tags(
     derived = dict(derived_tags or {})
     users = dict(user_tags or {})
     overrides = dict(user_overrides or {})
-    deletions = {normalize_key(a) for a in (user_deletions or ())}
+    deletions = {_deletion_axis(a) for a in (user_deletions or ())}
+    deletions.discard(None)
 
     effective: dict[str, dict[str, Any]] = {}
 
@@ -471,6 +512,24 @@ def merge_tags(
     return effective
 
 
+def merge_sidecar(sidecar: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Resolve a persisted sidecar dict into the wrapped effective-tag view.
+
+    ``merge_tags`` resolves one image from explicit keyword arguments; this
+    adapter unpacks the on-disk sidecar's owned keys into that call and wraps
+    the flat result in ``{"axes": ...}`` so API callers have a stable shape.
+    """
+    data = sidecar if isinstance(sidecar, Mapping) else {}
+    return {
+        "axes": merge_tags(
+            derived_tags=data.get("derived_tags"),
+            user_tags=data.get("user_tags"),
+            user_overrides=data.get("user_overrides"),
+            user_deletions=data.get("user_deletions"),
+        )
+    }
+
+
 def hash_prefix_pattern(file_hash: Any, length: int = FEEDBACK_HASH_PREFIX_LEN) -> str:
     """Return a glob-ish prefix pattern bucketing files with a similar hash.
 
@@ -505,7 +564,7 @@ def build_feedback_artifact(
     """
     users = dict(user_tags or {})
     overrides = dict(user_overrides or {})
-    deletions = sorted({normalize_key(a) for a in (user_deletions or ()) if normalize_key(a)})
+    deletions = sorted({a for a in (_deletion_axis(e) for e in (user_deletions or ())) if a})
 
     confirmed_axes: dict[str, str] = {}
     for axis in AXES:

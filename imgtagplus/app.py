@@ -23,13 +23,72 @@ from imgtagplus.converter import (
     VectorFormatError,
     rasterize_vector,
 )
-from imgtagplus.metadata import write_xmp
+from imgtagplus.metadata import (
+    compute_file_hash,
+    read_tag_sidecar,
+    write_tag_sidecar,
+    write_xmp,
+)
 from imgtagplus.monitor import Monitor
 from imgtagplus.profiler import AVAILABLE_MODELS
 from imgtagplus.scanner import scan
-from imgtagplus.tags import TAGS
+from imgtagplus.tags import (
+    TAGS,
+    TaxonomyError,
+    apply_feedback_at_scan,
+    validate_axis_key,
+)
 
 log = logging.getLogger(__name__)
+
+
+def _refresh_scan_feedback(image_path: Path) -> None:
+    """Honor persisted human feedback for *image_path* at scan time.
+
+    A rescan must not resurrect an axis the human deleted, nor clobber a
+    confirmed/overridden axis with a fresh analyzer guess.  We re-evaluate the
+    stored ``derived_tags`` through the feedback artifact and persist each
+    surviving axis as an unvetted user tag, which loses to genuine human input
+    (``confirmed_by: user`` / overrides) but outranks a fresh derived guess.
+
+    Failures here never abort a scan — the XMP sidecar is already written and
+    is the primary artifact.
+    """
+    try:
+        sidecar = read_tag_sidecar(image_path)
+    except Exception:  # pragma: no cover - defensive, read path already guards
+        return
+
+    feedback = sidecar.get("feedback_for_future_scans")
+    if not feedback:
+        return
+
+    derived = sidecar.get("derived_tags") or {}
+    if not derived:
+        return
+
+    resolved = apply_feedback_at_scan(feedback, derived)
+    user_tags = dict(sidecar.get("user_tags") or {})
+
+    for axis, record in resolved.items():
+        try:
+            canonical_axis = validate_axis_key(axis)
+        except TaxonomyError:
+            continue
+        user_tags[canonical_axis] = {
+            "key": record.get("key"),
+            "label": record.get("label"),
+            "confirmed_by": "unvetted",
+        }
+
+    try:
+        write_tag_sidecar(
+            image_path,
+            user_tags=user_tags,
+            file_hash=sidecar.get("file_hash") or compute_file_hash(image_path),
+        )
+    except Exception as exc:  # pragma: no cover - never break a scan
+        log.warning("Could not persist feedback for %s: %s", image_path, exc)
 
 
 def _tag_with(tagger, image_path: Path, args: argparse.Namespace) -> list[tuple[str, float]]:
@@ -255,6 +314,7 @@ def run(args: argparse.Namespace, progress_callback: Optional[Callable[[int, int
                 overwrite=getattr(args, "overwrite", False),
             )
             xmp_dirs.add(xmp_path.parent)
+            _refresh_scan_feedback(img_path)
             success_count += 1
 
         except Exception as exc:

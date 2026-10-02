@@ -37,9 +37,12 @@ from imgtagplus.profiler import get_model_recommendations, get_profiler_summary
 from imgtagplus.scanner import IMAGE_EXTENSIONS, scan
 from imgtagplus.tags import (
     TaxonomyError,
+    _deletion_axis,
     build_feedback_artifact,
+    make_deletion,
     make_override,
     make_user_tag,
+    merge_sidecar,
     merge_tags,
     normalize_key,
     taxonomy_summary,
@@ -361,21 +364,34 @@ def _save_tag_state(image_path: Path, sidecar: dict) -> dict:
     from imgtagplus.metadata import _get_image_lock
 
     with _get_image_lock(image_path):
-        written = write_tag_sidecar(
+        file_hash = sidecar.get("file_hash") or compute_file_hash(image_path)
+        # Regenerate the feedback artifact from the human edits being saved,
+        # so it always reflects the current sidecar rather than drifting.
+        feedback = build_feedback_artifact(
+            file_hash=file_hash,
+            user_tags=sidecar.get("user_tags"),
+            user_deletions=sidecar.get("user_deletions"),
+            user_overrides=sidecar.get("user_overrides"),
+        )
+        write_tag_sidecar(
             image_path,
             derived_tags=sidecar.get("derived_tags"),
             user_tags=sidecar.get("user_tags"),
             user_deletions=sidecar.get("user_deletions"),
             user_overrides=sidecar.get("user_overrides"),
-            feedback=sidecar.get("feedback_for_future_scans"),
+            feedback=feedback,
+            file_hash=file_hash,
         )
-    return merge_tags(written)
+        # Re-read under the same lock so the response reflects exactly what
+        # landed on disk (write_tag_sidecar returns a path, not the payload).
+        persisted = read_tag_sidecar(image_path)
+    return merge_sidecar(persisted)
 
 
 def _tag_view(image_path: Path) -> dict:
     """Merged effective-tag view for one image, including sidecar internals."""
     sidecar = _load_tag_state(image_path)
-    merged = merge_tags(sidecar)
+    merged = merge_sidecar(sidecar)
     merged["file_hash"] = sidecar.get("file_hash")
     merged["sidecar_path"] = str(sidecar_path_for_image(image_path))
     return merged
@@ -429,7 +445,7 @@ async def put_user_tag(request: Request):
         # A fresh user tag supersedes a deletion of the same axis.
         deletions = [
             d for d in sidecar.get("user_deletions", [])
-            if normalize_key(d.get("axis")) != axis
+            if _deletion_axis(d) != axis
         ]
         sidecar["user_tags"] = user_tags
         sidecar["user_deletions"] = deletions
@@ -448,7 +464,7 @@ async def put_override(request: Request):
 
     def mutate(sidecar: dict, payload: dict) -> None:
         axis = validate_axis_key(payload.get("axis", ""))
-        current = merge_tags(sidecar)["axes"].get(axis)
+        current = merge_sidecar(sidecar)["axes"].get(axis)
         if not current or not current.get("key"):
             raise HTTPException(
                 status_code=400,
@@ -475,23 +491,17 @@ async def delete_tag(request: Request):
 
     def mutate(sidecar: dict, payload: dict) -> None:
         axis = validate_axis_key(payload.get("axis", ""))
-        current = merge_tags(sidecar)["axes"].get(axis)
+        current = merge_sidecar(sidecar)["axes"].get(axis)
         if not current or not current.get("key"):
             raise HTTPException(
                 status_code=400,
                 detail=f"axis {axis} has no current value to delete",
             )
-        deletions = list(sidecar.get("user_deletions", []))
-        deletions.append(
-            build_feedback_artifact(
-                {
-                    "axis": axis,
-                    "key": current.get("key"),
-                    "label": current.get("label", ""),
-                    "source": current.get("source", ""),
-                }
-            )
-        )
+        deletions = [
+            d for d in sidecar.get("user_deletions", [])
+            if _deletion_axis(d) != axis
+        ]
+        deletions.append(make_deletion(axis, current.get("key")))
         sidecar["user_deletions"] = deletions
 
     return await _mutate_tags(request, body, mutate)
@@ -507,7 +517,7 @@ async def reset_deletion(request: Request):
         before = len(sidecar.get("user_deletions", []))
         sidecar["user_deletions"] = [
             d for d in sidecar.get("user_deletions", [])
-            if normalize_key(d.get("axis")) != axis
+            if _deletion_axis(d) != axis
         ]
         if len(sidecar["user_deletions"]) == before:
             raise HTTPException(
