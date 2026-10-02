@@ -191,3 +191,8 @@ Log file: /path/to/imgtagplus_20260210_190000.log
 ## License
 
 MIT
+
+
+## Classification
+
+See [docs/CLASSIFICATION.md](docs/CLASSIFICATION.md) for setup, supported formats (PNG/SVG/DXF), taxonomy configuration, and tag-feedback behavior.

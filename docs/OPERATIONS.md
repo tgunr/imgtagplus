@@ -118,3 +118,8 @@ pytest
 ```
 
 If tests fail during collection, check that the repository root is on `PYTHONPATH` or run the suite in the same environment used for normal package development.
+
+
+## See also
+
+[CLASSIFICATION.md](CLASSIFICATION.md) — setup, SVG/DXF rasterization requirements (resvg, ezdxf), temp-artifact cleanup, and scan exit-code semantics.

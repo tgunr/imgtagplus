@@ -239,3 +239,8 @@ Some current design choices are deliberate:
 - model recommendations are advisory; unsupported models may still appear, but the UI flags them
 
 For exact endpoint contracts, see `docs/API.md`. For model-specific runtime behavior, see `docs/MODELS.md`.
+
+
+## See also
+
+[CLASSIFICATION.md](CLASSIFICATION.md) — format pipeline, taxonomy, sidecar layout, and feedback precedence.

@@ -369,3 +369,8 @@ The web server flow has no path restrictions: browse requests start at the user'
 - `/docs` is FastAPI's generated interactive API reference for the same app
 
 Those routes are part of the same local process and same-origin policy as the API.
+
+
+## See also
+
+[CLASSIFICATION.md](CLASSIFICATION.md) — supported formats, taxonomy axes, and feedback semantics behind the tag endpoints.

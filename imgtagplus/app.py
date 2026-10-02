@@ -36,6 +36,7 @@ from imgtagplus.tags import (
     TAGS,
     TaxonomyError,
     apply_feedback_at_scan,
+    make_override,
     validate_axis_key,
 )
 
@@ -47,9 +48,17 @@ def _refresh_scan_feedback(image_path: Path) -> None:
 
     A rescan must not resurrect an axis the human deleted, nor clobber a
     confirmed/overridden axis with a fresh analyzer guess.  We re-evaluate the
-    stored ``derived_tags`` through the feedback artifact and persist each
-    surviving axis as an unvetted user tag, which loses to genuine human input
-    (``confirmed_by: user`` / overrides) but outranks a fresh derived guess.
+    stored ``derived_tags`` through the feedback artifact and persist ONLY the
+    axes the artifact asserts as human input:
+
+      * ``user_confirmed`` → re-asserted as ``confirmed_by: "user"`` user tag
+      * ``user_override``  → re-asserted as a user override record
+
+    Pure ``derived`` axes are skipped — a machine guess is already served
+    from ``derived_tags`` and must never be promoted into ``user_tags``.
+    ``user_unvetted`` records are dropped: the only writer of unvetted tags
+    was this function (an earlier bug), and a stale one would outrank fresh
+    analyzer output forever.
 
     Failures here never abort a scan — the XMP sidecar is already written and
     is the primary artifact.
@@ -59,32 +68,65 @@ def _refresh_scan_feedback(image_path: Path) -> None:
     except Exception:  # pragma: no cover - defensive, read path already guards
         return
 
-    feedback = sidecar.get("feedback_for_future_scans")
-    if not feedback:
-        return
-
-    derived = sidecar.get("derived_tags") or {}
-    if not derived:
-        return
-
-    resolved = apply_feedback_at_scan(feedback, derived)
     user_tags = dict(sidecar.get("user_tags") or {})
+    overrides = dict(sidecar.get("user_overrides") or {})
 
-    for axis, record in resolved.items():
-        try:
-            canonical_axis = validate_axis_key(axis)
-        except TaxonomyError:
-            continue
-        user_tags[canonical_axis] = {
-            "key": record.get("key"),
-            "label": record.get("label"),
-            "confirmed_by": "unvetted",
-        }
+    # Purge unvetted user-tag leftovers from the pre-fix stamper: they were
+    # never genuine human input and would outrank fresh analyzer output
+    # forever.  This runs even without a feedback artifact (the old stamper
+    # was the only writer of ``confirmed_by: "unvetted"``).
+    stale_unvetted = [
+        axis
+        for axis, rec in user_tags.items()
+        if isinstance(rec, dict) and rec.get("confirmed_by") == "unvetted"
+    ]
+    for axis in stale_unvetted:
+        del user_tags[axis]
+    changed = bool(stale_unvetted)
+
+    feedback = sidecar.get("feedback_for_future_scans")
+    derived = sidecar.get("derived_tags") or {}
+
+    if feedback and derived:
+        resolved = apply_feedback_at_scan(feedback, derived)
+
+        for axis, record in resolved.items():
+            try:
+                canonical_axis = validate_axis_key(axis)
+            except TaxonomyError:
+                continue
+            source = record.get("source")
+            if source == "user_confirmed":
+                # Restamp from the artifact so the human assertion survives
+                # even if its on-disk record was lost.
+                user_tags[canonical_axis] = {
+                    "key": record.get("key"),
+                    "label": record.get("label"),
+                    "confirmed_by": "user",
+                }
+                # A fresh confirmation supersedes a deletion of the same axis.
+                overrides.pop(canonical_axis, None)
+                changed = True
+            elif source == "user_override":
+                try:
+                    overrides[canonical_axis] = make_override(
+                        canonical_axis,
+                        record.get("old"),
+                        record.get("key"),
+                        reason="",
+                    )
+                except TaxonomyError:
+                    continue
+                changed = True
+
+    if not changed:
+        return
 
     try:
         write_tag_sidecar(
             image_path,
             user_tags=user_tags,
+            user_overrides=overrides,
             file_hash=sidecar.get("file_hash") or compute_file_hash(image_path),
         )
     except Exception as exc:  # pragma: no cover - never break a scan

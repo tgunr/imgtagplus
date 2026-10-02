@@ -368,3 +368,138 @@ def test_rescan_does_not_resurrect_deleted_axis(client: TestClient, image: Path)
 def test_merge_sidecar_shape_matches_api(client: TestClient, image: Path) -> None:
     _put(client, "user", image, axis="process", key="ENGRAVE")
     assert merge_sidecar(read_tag_sidecar(image))["axes"]["process"]["key"] == "ENGRAVE"
+
+
+# ---------------------------------------------------------------------------
+# Scan-time feedback must not demote or pollute user records (regression)
+# ---------------------------------------------------------------------------
+
+def test_rescan_preserves_user_confirmed_axis(client: TestClient, image: Path) -> None:
+    """End-to-end: a confirmed axis survives a rescan with fresh derived tags."""
+    from imgtagplus.app import _refresh_scan_feedback
+    from imgtagplus.metadata import write_tag_sidecar
+
+    write_tag_sidecar(
+        image, derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.9}}
+    )
+    _put(client, "user", image, axis="process", key="PROFILE_CUT")
+
+    # A rescan re-derives a (conflicting) analyzer guess...
+    write_tag_sidecar(
+        image,
+        derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.95}},
+    )
+    _refresh_scan_feedback(image)
+
+    # ...the human confirmation still wins, and was NOT demoted to unvetted.
+    assert _tag_view(image)["axes"]["process"]["source"] == "user_confirmed"
+    assert read_tag_sidecar(image)["user_tags"]["process"]["confirmed_by"] == "user"
+
+
+def test_rescan_does_not_stamp_derived_axes_into_user_tags(
+    client: TestClient, image: Path
+) -> None:
+    """Pure analyzer output must stay in ``derived_tags`` — never in user_tags."""
+    from imgtagplus.app import _refresh_scan_feedback
+    from imgtagplus.metadata import write_tag_sidecar
+
+    write_tag_sidecar(
+        image, derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.9}}
+    )
+    _put(client, "user", image, axis="material_family", key="WOOD")
+
+    # Rescan re-derives process (no human ever touched it)...
+    write_tag_sidecar(
+        image,
+        derived_tags={
+            "process": {"key": "ENGRAVE", "confidence": 0.95},
+            "material_family": {"key": "WOOD", "confidence": 0.9},
+        },
+    )
+    _refresh_scan_feedback(image)
+
+    sidecar = read_tag_sidecar(image)
+    # No promotion of the derived guess into user space...
+    assert "process" not in sidecar["user_tags"]
+    # ...and the human's material_family tag is untouched.
+    assert sidecar["user_tags"]["material_family"]["confirmed_by"] == "user"
+    # The derived guess is still served from derived_tags.
+    assert _tag_view(image)["axes"]["process"]["source"] == "derived"
+
+
+def test_rescan_restamps_override_from_artifact(
+    client: TestClient, image: Path
+) -> None:
+    """An overridden axis is re-asserted as an override, not demoted."""
+    from imgtagplus.app import _refresh_scan_feedback
+    from imgtagplus.metadata import write_tag_sidecar
+
+    write_tag_sidecar(
+        image,
+        derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.9}},
+    )
+    _put(client, "override", image, axis="process", new="PROFILE_CUT", reason="wrong process")
+
+    # Rescan re-derives the original guess...
+    write_tag_sidecar(
+        image,
+        derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.95}},
+    )
+    _refresh_scan_feedback(image)
+
+    # ...the override still wins and keeps its user_override provenance.
+    axes = _tag_view(image)["axes"]
+    assert axes["process"]["source"] == "user_override"
+    assert axes["process"]["key"] == "PROFILE_CUT"
+    assert sidecar_overrides(read_tag_sidecar(image))["process"]["new"] == "PROFILE_CUT"
+
+
+def sidecar_overrides(sidecar: dict) -> dict:
+    return sidecar["user_overrides"]
+
+
+def test_rescan_drops_stale_unvetted_tag(client: TestClient, image: Path) -> None:
+    """A stale ``unvetted`` tag (written by the old buggy stamper) is removed.
+
+    The stamper was the only writer of unvetted records; leaving one behind
+    would outrank fresh analyzer output forever.
+    """
+    from imgtagplus.app import _refresh_scan_feedback
+    from imgtagplus.metadata import write_tag_sidecar
+
+    write_tag_sidecar(
+        image,
+        derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.9}},
+        user_tags={"process": {"key": "ENGRAVE", "confirmed_by": "unvetted"}},
+    )
+
+    _refresh_scan_feedback(image)
+
+    assert "process" not in read_tag_sidecar(image)["user_tags"]
+    # The derived value still serves the axis.
+    assert _tag_view(image)["axes"]["process"]["source"] == "derived"
+
+
+def test_rescan_confirmed_axis_supersedes_stale_override(
+    client: TestClient, image: Path
+) -> None:
+    """A fresh user confirmation clears an older override of the same axis."""
+    from imgtagplus.app import _refresh_scan_feedback
+    from imgtagplus.metadata import write_tag_sidecar
+
+    write_tag_sidecar(
+        image, derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.9}}
+    )
+    _put(client, "override", image, axis="process", new="PROFILE_CUT")
+    _put(client, "user", image, axis="process", key="DRILL")
+
+    write_tag_sidecar(
+        image,
+        derived_tags={"process": {"key": "ENGRAVE", "confidence": 0.95}},
+    )
+    _refresh_scan_feedback(image)
+
+    sidecar = read_tag_sidecar(image)
+    assert "process" not in sidecar["user_overrides"]
+    assert sidecar["user_tags"]["process"]["confirmed_by"] == "user"
+    assert _tag_view(image)["axes"]["process"]["source"] == "user_confirmed"
