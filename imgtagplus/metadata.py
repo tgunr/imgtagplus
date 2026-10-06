@@ -4,6 +4,14 @@ Generates Adobe-compatible XMP sidecar files (``.xmp``) that store
 keywords in the ``dc:subject`` field.  Recognised by Lightroom, Bridge,
 Darktable, digiKam, XnView, and virtually all DAM systems.
 
+Sidecars are named after the *full* asset filename (``panel.png`` →
+``panel.png.xmp``) so assets that differ only by extension never share one
+sidecar.  This matches the JSON sidecar convention
+(``TAG_SIDECAR_SUFFIX``) and the ``<name>.<ext>.xmp`` form Adobe software
+also accepts.  Sidecars written by older builds used the bare stem
+(``panel.xmp``); those are still *read* — see ``resolve_xmp_path`` for the
+migration policy.
+
 Also owns the taxonomy JSON sidecar (``.imgtagplus.json``) that carries
 the analyzer's ``derived_tags`` alongside human edits — user tags,
 deletions, overrides, and the ``feedback_for_future_scans`` artifact.
@@ -40,6 +48,41 @@ for prefix, uri in _NS.items():
     ET.register_namespace(prefix, uri)
 
 
+#: Filename suffix of the XMP sidecar.  Appended to the full asset name
+#: (``panel.png`` → ``panel.png.xmp``) rather than to the bare stem.
+XMP_SIDECAR_SUFFIX = ".xmp"
+
+
+def _canonical_xmp_path(
+    image_path: Path, output_dir: Path | None = None
+) -> Path:
+    """Return the canonical XMP sidecar path for *image_path*.
+
+    Named from the full filename so ``panel.png`` and ``panel.dxf`` in one
+    directory get ``panel.png.xmp`` and ``panel.dxf.xmp``.
+    """
+    base_dir = output_dir if output_dir is not None else image_path.parent
+    return base_dir / f"{image_path.name}{XMP_SIDECAR_SUFFIX}"
+
+
+def _legacy_xmp_path(
+    image_path: Path, output_dir: Path | None = None
+) -> Path:
+    """Return the pre-2026-10 stem-only XMP sidecar path, or ``None``.
+
+    ``panel.png`` → ``panel.xmp``.  This collides across extensions, so it
+    is only consulted as a read fallback for sidecars written by builds
+    that predate the extension-preserving name.
+    """
+    base_dir = output_dir if output_dir is not None else image_path.parent
+    legacy = base_dir / f"{image_path.stem}{XMP_SIDECAR_SUFFIX}"
+    if legacy == _canonical_xmp_path(image_path, output_dir):
+        # Extensionless asset: ``name == stem``, so the canonical and legacy
+        # names coincide and there is no second candidate to fall back to.
+        return None
+    return legacy
+
+
 def write_xmp(
     image_path: Path,
     tags: Sequence[str],
@@ -47,6 +90,12 @@ def write_xmp(
     overwrite: bool = False,
 ) -> Path:
     """Write (or merge into) an XMP sidecar file for *image_path*.
+
+    The sidecar is written to the canonical ``<name>.<ext>.xmp`` path.
+    Tags from a pre-existing legacy ``<stem>.xmp`` (written by older
+    builds) are carried over on the first write so human keywords entered
+    in Lightroom are not silently lost, and the legacy file is left in
+    place — removal is the user's call, not the scanner's.
 
     Parameters
     ----------
@@ -59,6 +108,9 @@ def write_xmp(
         directory as the image.
     overwrite:
         If ``True``, replace existing tags entirely instead of merging.
+        This is a clean slate: neither an existing canonical
+        ``<name>.<ext>.xmp`` nor a legacy ``<stem>.xmp`` is read, so
+        ``overwrite=True`` never resurrects stale or legacy tags.
 
     Returns
     -------
@@ -69,13 +121,29 @@ def write_xmp(
         output_dir = image_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    xmp_path = output_dir / (image_path.stem + ".xmp")
+    xmp_path = _canonical_xmp_path(image_path, output_dir)
+    legacy_path = _legacy_xmp_path(image_path, output_dir)
 
-    # If the sidecar already exists, merge tags (unless overwriting).
+    # Merge tags unless the caller asked for a clean slate.  ``overwrite=True``
+    # deliberately ignores *both* the canonical sidecar and any legacy
+    # ``<stem>.xmp`` — it means "these tags are the complete truth".
     existing_tags: set[str] = set()
-    if not overwrite and xmp_path.exists():
-        existing_tags = _read_existing_tags(xmp_path)
-        log.debug("Existing XMP has %d tags: %s", len(existing_tags), xmp_path)
+    if not overwrite:
+        if xmp_path.exists():
+            existing_tags = _read_existing_tags(xmp_path)
+            log.debug("Existing XMP has %d tags: %s", len(existing_tags), xmp_path)
+        elif legacy_path is not None and legacy_path.exists():
+            # Migration: adopt the legacy sidecar's keywords on this write so
+            # hand-typed keywords are not lost when the name changes.
+            legacy_tags = _read_existing_tags(legacy_path)
+            if legacy_tags:
+                log.info(
+                    "Migrating legacy XMP sidecar %s to %s (%d tag(s))",
+                    legacy_path,
+                    xmp_path,
+                    len(legacy_tags),
+                )
+                existing_tags = legacy_tags
 
     merged = sorted(existing_tags | set(tags))
 
@@ -87,19 +155,45 @@ def write_xmp(
 
 
 def sidecar_path_for_image(image_path: Path, output_dir: Path | None = None) -> Path:
-    """Return the XMP sidecar path associated with *image_path*."""
-    sidecar_dir = output_dir if output_dir is not None else image_path.parent
-    return sidecar_dir / f"{image_path.stem}.xmp"
+    """Return the canonical XMP sidecar path associated with *image_path*.
+
+    ``panel.png`` → ``panel.png.xmp``, so assets that differ only by
+    extension never collide.  This is a pure path computation — no
+    filesystem access, no legacy fallback; use ``resolve_xmp_path`` when
+    you need to know which file a read would actually hit.
+    """
+    return _canonical_xmp_path(image_path, output_dir)
+
+
+def resolve_xmp_path(image_path: Path, output_dir: Path | None = None) -> Path | None:
+    """Return the XMP sidecar path a read should use, or ``None``.
+
+    Prefers the canonical ``<name>.<ext>.xmp``.  When that is absent and a
+    legacy stem-only ``<stem>.xmp`` from an older build exists, the legacy
+    path is returned so its tags remain visible until the next scan
+    migrates them.  ``None`` means the asset has no XMP metadata at all.
+    """
+    canonical = _canonical_xmp_path(image_path, output_dir)
+    if canonical.exists():
+        return canonical
+    legacy = _legacy_xmp_path(image_path, output_dir)
+    if legacy is not None and legacy.exists():
+        return legacy
+    return None
 
 
 def read_xmp_tags(image_path: Path, output_dir: Path | None = None) -> list[str]:
     """Return sorted tags from the XMP sidecar for *image_path*.
 
+    Falls back to a legacy stem-only ``<stem>.xmp`` written by an older
+    build when the canonical sidecar is missing, so pre-existing human
+    keywords stay visible after the naming change.
+
     Missing sidecars are treated as empty metadata rather than an error so
     callers can render "untagged" images without extra exception handling.
     """
-    xmp_path = sidecar_path_for_image(image_path, output_dir=output_dir)
-    if not xmp_path.exists():
+    xmp_path = resolve_xmp_path(image_path, output_dir=output_dir)
+    if xmp_path is None:
         return []
     return sorted(_read_existing_tags(xmp_path))
 

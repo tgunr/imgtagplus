@@ -1,27 +1,6 @@
-node_modules/
-sandbox/
-.agent_reports/
-
-# Logs
-*.log
-
-# Environment files
-.env*
-
-# macOS / system artifacts
-.DS_Store
-
-# Python cache and test artifacts
 __pycache__/
-*.py[cod]
+*.pyc
+.venv/
+*.egg-info/
 .pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Local model caches and downloaded artifacts
-.cache/
-.cache/imgtagplus/
-.cache/huggingface/
-
-# Local agent / assistant artifacts
-.gemini/
+imgtagplus_*.log

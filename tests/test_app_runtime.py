@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from imgtagplus.app import _format_runtime, run
+from imgtagplus.metadata import sidecar_path_for_image
 
 
 def test_format_runtime_zero_pads_components() -> None:
@@ -43,6 +44,11 @@ def _create_test_image(path: Path) -> Path:
     return path
 
 
+def _xmp(image: Path) -> Path:
+    """Return the sidecar path *run()* is expected to write for *image*."""
+    return sidecar_path_for_image(image)
+
+
 class FakeTagger:
     """Mock tagger that returns fixed results."""
 
@@ -74,7 +80,7 @@ def test_run_happy_path_writes_xmp(mock_scan, mock_monitor_cls, tmp_path):
         exit_code = run(args)
 
     assert exit_code == 0
-    xmp_path = tmp_path / "photo.xmp"
+    xmp_path = _xmp(img)
     assert xmp_path.exists()
     content = xmp_path.read_text()
     assert "sunset" in content
@@ -101,7 +107,7 @@ def test_run_continue_on_error_skips_failures(mock_scan, mock_monitor_cls, tmp_p
     # Exit code 2 = completed with errors
     assert exit_code == 2
     # The good image should still have been processed
-    assert (tmp_path / "good.xmp").exists()
+    assert _xmp(img_ok).exists()
 
 
 @patch("imgtagplus.app.scan")
@@ -135,7 +141,7 @@ def test_run_unknown_model_falls_back_to_clip(mock_scan, mock_monitor_cls, tmp_p
 
     assert exit_code == 0
     # Should have fallen back to clip and still processed
-    assert (tmp_path / "photo.xmp").exists()
+    assert _xmp(img).exists()
 
 
 @patch("imgtagplus.app.Monitor")
@@ -177,7 +183,7 @@ def test_run_overwrite_replaces_tags(mock_scan, mock_monitor_cls, tmp_path):
     with patch("imgtagplus.tagger.Tagger", return_value=fake_tagger):
         run(_make_args(tmp_path))
 
-    xmp_path = tmp_path / "photo.xmp"
+    xmp_path = _xmp(img)
     assert "old_tag" in xmp_path.read_text()
 
     # Second run: overwrite with new tags
@@ -244,7 +250,7 @@ def test_run_tags_svg_via_rasterization(mock_scan, mock_monitor_cls, tmp_path):
     assert seen["path"].suffix == ".png"
     assert seen["path"] != svg
     # Sidecar written against the ORIGINAL vector file.
-    xmp = tmp_path / "drawing.xmp"
+    xmp = _xmp(svg)
     assert xmp.exists()
     assert "cnc part" in xmp.read_text()
     # Isolated temp raster dir cleaned up.
@@ -270,7 +276,7 @@ def test_run_no_vector_skips_svg(mock_scan, mock_monitor_cls, tmp_path):
 
     assert exit_code == 0
     tagger.tag_image.assert_not_called()
-    assert not (tmp_path / "skipped.xmp").exists()
+    assert not _xmp(svg).exists()
 
 
 @patch("imgtagplus.app.Monitor")
@@ -290,7 +296,7 @@ def test_run_invalid_vector_counts_as_error(mock_scan, mock_monitor_cls, tmp_pat
         )
 
     assert exit_code == 2
-    assert not (tmp_path / "junk.xmp").exists()
+    assert not _xmp(bad).exists()
 
 
 @patch("imgtagplus.app.Monitor")
@@ -317,4 +323,4 @@ def test_run_native_raster_untouched_by_vector_path(
 
     assert exit_code == 0
     assert seen["path"] == img
-    assert (tmp_path / "photo.xmp").exists()
+    assert _xmp(img).exists()

@@ -64,14 +64,32 @@ exit code, and produce no sidecar output. One bad file never aborts the scan.
 
 Sidecars written next to each processed asset:
 
-- `<stem>.xmp` — XMP metadata with the analyzer's tags
+- `<name>.xmp` — XMP metadata with the analyzer's tags, named after the
+  full asset filename (`panel.png` → `panel.png.xmp`), matching Adobe's
+  sidecar convention and the JSON sidecar's `<name>.<suffix>` pattern
 - `<name>.imgtagplus.json` — tag state: `derived_tags`, `user_tags`,
   `user_overrides`, `file_hash`, and `feedback_for_future_scans`
 
-Known limitation: because the XMP file is named from the stem only, two assets
-with the same stem but different extensions in one directory (e.g. `panel.png`
-and `panel.dxf`) share one `<stem>.xmp` — last writer wins. JSON sidecars are
-not affected.
+Because the XMP name includes the extension, assets that differ only by
+extension in one directory (e.g. `panel.png` and `panel.dxf`) get
+independent sidecars — no last-writer-wins collision.
+
+### Legacy `<stem>.xmp` sidecars (pre-2026-10 builds)
+
+Older builds wrote the XMP sidecar from the bare stem (`panel.xmp`).
+Those files are not silently ignored:
+
+- **Read**: when `<name>.xmp` is absent, the reader falls back to the
+  legacy `<stem>.xmp` (see `resolve_xmp_path` in `imgtagplus/metadata.py`),
+  so hand-typed keywords stay visible.
+- **Migrate on write**: the next `write_xmp` merges any legacy tags into
+  the new `<name>.xmp` (the same merge path used for existing tags).
+  The legacy file itself is *not* deleted — remove it once its tags are
+  confirmed in the new sidecar.
+- `overwrite=True` starts a clean slate in `<name>.xmp` and does not
+  adopt legacy tags.
+- Fallback only ever triggers when the canonical sidecar is missing, so
+  once a scan has written `<name>.xmp`, the legacy file is inert.
 
 ## Taxonomy configuration
 
