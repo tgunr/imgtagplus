@@ -247,14 +247,29 @@ def _rasterize_dxf(path: Path, target_px: int) -> RasterHandle:
     out = tmpdir / f"{path.stem}.png"
     dpi = 100
     inches = max(2.0, target_px / dpi)
-    fig = plt.figure(figsize=(inches, inches), dpi=dpi)
+    # Cyan-on-dark preview theme: dark background, strokes recoloured to cyan
+    # after layout (source linework is dark and would vanish on dark).
+    bg = "#141414"
+    cyan = "#00ffff"
+    fig = plt.figure(figsize=(inches, inches), dpi=dpi, facecolor=bg)
     ax = fig.add_axes([0, 0, 1, 1])
-    ax.set_facecolor("white")
-    fig.patch.set_facecolor("white")
+    ax.set_facecolor(bg)
+    fig.patch.set_facecolor(bg)
+    ax.set_axis_off()
     try:
         ctx = RenderContext(doc)
         Frontend(ctx, MatplotlibBackend(ax)).draw_layout(msp, finalize=True)
-        fig.savefig(out, facecolor="white", bbox_inches="tight", pad_inches=0.1)
+        import matplotlib.lines as _mlines
+        import matplotlib.patches as _mpatches
+
+        for child in ax.get_children():
+            if isinstance(child, _mpatches.PathPatch):
+                child.set_edgecolor(cyan)
+                child.set_facecolor("none")
+                child.set_linewidth(max(child.get_linewidth(), 1.2))
+            elif isinstance(child, _mlines.Line2D):
+                child.set_color(cyan)
+        fig.savefig(out, facecolor=bg, bbox_inches="tight", pad_inches=0.1)
     except Exception as exc:
         raise ConversionError(f"DXF drawing failed for {path}: {exc}") from exc
     finally:

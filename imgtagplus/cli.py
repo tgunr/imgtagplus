@@ -91,8 +91,14 @@ def start_server_daemon() -> None:
     
     # Persist the PID immediately so later stop/restart commands can recover even across shells.
     PID_FILE.write_text(str(proc.pid))
-    if _wait_for_server_ready("http://127.0.0.1:5000/health"):
-        print(f"Server started on http://127.0.0.1:5000 (PID {proc.pid})")
+    # Resolve the same host/port as server.py so the health poll matches the
+    # actual bind (IMGTAGPLUS_HOST / IMGTAGPLUS_PORT, defaults 0.0.0.0:5002).
+    env_host = os.environ.get("IMGTAGPLUS_HOST", "").strip() or (
+        "127.0.0.1" if os.environ.get("IMGTAGPLUS_LOOPBACK", "").strip() == "1" else "0.0.0.0"
+    )
+    env_port = os.environ.get("IMGTAGPLUS_PORT", "").strip() or "5002"
+    if _wait_for_server_ready(f"http://127.0.0.1:{env_port}/health"):
+        print(f"Server started on http://{env_host}:{env_port} (PID {proc.pid})")
         return
 
     print(f"Server process started (PID {proc.pid}), but /health did not become ready in time.")

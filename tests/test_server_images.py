@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
@@ -88,3 +89,33 @@ def test_get_image_file_rejects_non_image_paths(image_client) -> None:
 
     assert response.status_code == 400
     assert response.json() == {"detail": "Unsupported image type"}
+
+
+def test_api_image_renders_dxf_cyan_on_dark(image_client, tmp_path):
+    """GET /api/image for a DXF returns a cyan-on-dark PNG, not the raw file."""
+    from PIL import Image
+
+    import numpy as np
+
+    dxf = tmp_path / "theme.dxf"
+    dxf.write_text(
+        "\n".join(
+            [
+                "0", "SECTION", "2", "HEADER", "0", "ENDSEC",
+                "0", "SECTION", "2", "ENTITIES",
+                "0", "LINE", "8", "0",
+                "10", "0.0", "20", "0.0", "11", "10.0", "21", "10.0",
+                "0", "ENDSEC", "0", "EOF",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    resp = image_client[0].get("/api/image", params={"path": str(dxf)})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    im = np.asarray(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+    dark = (im.mean(axis=2) < 60).mean()
+    cyan = ((im[:, :, 1] > 150) & (im[:, :, 2] > 150) & (im[:, :, 0] < 150)).mean()
+    assert dark > 0.5
+    assert cyan > 0.0

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
 from imgtagplus.app import run as app_run
@@ -235,7 +236,8 @@ async def browse_directory(request: Request, path: str = ""):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     if not path:
-        current_path = Path.home()
+        env_default = os.environ.get("IMGTAGPLUS_DEFAULT_DIR", "").strip()
+        current_path = Path(env_default) if env_default else Path.home()
     else:
         current_path = Path(path)
 
@@ -316,6 +318,22 @@ async def get_image_file(request: Request, path: str):
     resolved_path = image_path.resolve()
     if resolved_path.suffix.lower() not in IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported image type")
+
+    # Vector drawings (SVG/DXF) are rasterized to PNG on the fly (cyan-on-dark
+    # preview theme) so the browser can display them; rasters serve as-is.
+    from imgtagplus.converter import VECTOR_EXTENSIONS, rasterize_vector
+
+    if resolved_path.suffix.lower() in VECTOR_EXTENSIONS:
+        try:
+            raster = rasterize_vector(resolved_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not render drawing: {exc}")
+        return FileResponse(
+            path=raster.path,
+            filename=f"{resolved_path.stem}.png",
+            media_type="image/png",
+            background=BackgroundTask(raster.close),
+        )
 
     media_type = mimetypes.guess_type(resolved_path.name)[0] or "application/octet-stream"
     return FileResponse(path=resolved_path, filename=resolved_path.name, media_type=media_type)
@@ -766,8 +784,29 @@ async def download_log():
     return FileResponse(path=latest_log, filename=latest_log.name)
 
 
-def start_server(host="127.0.0.1", port=5000):
+def _server_host() -> str:
+    """Resolve bind host: loopback-only when IMGTAGPLUS_LOOPBACK=1, else all interfaces."""
+    if os.environ.get("IMGTAGPLUS_LOOPBACK", "").strip() == "1":
+        return "127.0.0.1"
+    return os.environ.get("IMGTAGPLUS_HOST", "").strip() or "0.0.0.0"
+
+
+def _server_port() -> int:
+    """Resolve listen port: IMGTAGPLUS_PORT env, else 5002 (5000 clashes with AirPlay)."""
+    raw = os.environ.get("IMGTAGPLUS_PORT", "").strip()
+    if not raw:
+        return 5002
+    try:
+        return int(raw)
+    except ValueError:
+        logging.warning("Invalid IMGTAGPLUS_PORT %r; using 5002", raw)
+        return 5002
+
+
+def start_server(host: str | None = None, port: int | None = None):
     """Run the FastAPI app under uvicorn for the local web UI."""
+    host = host if host is not None else _server_host()
+    port = port if port is not None else _server_port()
     logging.info(f"Starting Web UI on http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 

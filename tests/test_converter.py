@@ -193,3 +193,33 @@ def test_scanner_accepts_single_vector_file(dxf_file):
 
 def test_vector_extensions_in_image_extensions():
     assert {".svg", ".dxf"} <= IMAGE_EXTENSIONS
+
+
+def test_dxf_raster_theme_cyan_on_dark(tmp_path):
+    """DXF previews render cyan strokes on a dark background."""
+    from PIL import Image
+
+    import numpy as np
+
+    from imgtagplus.converter import rasterize_vector
+
+    dxf = tmp_path / "theme.dxf"
+    dxf.write_text(
+        "\n".join(
+            [
+                "0", "SECTION", "2", "HEADER", "0", "ENDSEC",
+                "0", "SECTION", "2", "ENTITIES",
+                "0", "LINE", "8", "0",
+                "10", "0.0", "20", "0.0", "11", "10.0", "21", "10.0",
+                "0", "ENDSEC", "0", "EOF",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    with rasterize_vector(dxf) as raster:
+        im = np.asarray(Image.open(raster.path).convert("RGB"))
+    dark = (im.mean(axis=2) < 60).mean()
+    cyan = ((im[:, :, 1] > 150) & (im[:, :, 2] > 150) & (im[:, :, 0] < 150)).mean()
+    assert dark > 0.5, "background should be dark"
+    assert cyan > 0.0, "strokes should be cyan"
