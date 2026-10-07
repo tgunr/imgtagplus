@@ -108,6 +108,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const viewerGridModeBtn = document.getElementById('viewer-grid-mode');
     const viewerListModeBtn = document.getElementById('viewer-list-mode');
 
+    // Batch Selection Toolbar
+    const batchToolbar = document.getElementById('batch-toolbar');
+    const batchCountLabel = document.getElementById('batch-count');
+    const batchSelectAllBtn = document.getElementById('batch-select-all-btn');
+    const batchApplyOpenBtn = document.getElementById('batch-apply-open-btn');
+    const batchRemoveOpenBtn = document.getElementById('batch-remove-open-btn');
+    const batchClearBtn = document.getElementById('batch-clear-btn');
+
     // Lightbox Elements
     const lightboxTitle = document.getElementById('lightbox-title');
     const lightboxPosition = document.getElementById('lightbox-position');
@@ -122,6 +130,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const lightboxTagError = document.getElementById('lightbox-tag-error');
     const lightboxNewTagInput = document.getElementById('lightbox-new-tag-input');
     const lightboxAddTagBtn = document.getElementById('lightbox-add-tag-btn');
+    const lightboxAutocompleteDropdown = document.getElementById('lightbox-autocomplete-dropdown');
+    const lightboxAutocompleteItems = document.getElementById('lightbox-autocomplete-items');
+    const lightboxBatchApplyBtn = document.getElementById('batch-apply-btn');
+
+    // Rapid Decision Overlay Elements
+    const rapidOverlayDialog = document.getElementById('rapid-overlay-dialog');
+    const rapidOverlayGrid = document.getElementById('rapid-overlay-grid');
+    const rapidAxisName = document.getElementById('rapid-axis-name');
+
+    // Batch Apply Dialog Elements
+    const batchApplyDialog = document.getElementById('batch-apply-dialog');
+    const batchApplyDesc = document.getElementById('batch-apply-desc');
+    const batchApplyConfirmBtn = document.getElementById('batch-apply-confirm-btn');
+    const batchPendingBox = document.getElementById('batch-pending-tags');
+    const batchTaxChips = document.getElementById('batch-tax-chips');
+    const batchRemoveNote = document.getElementById('batch-remove-note');
+    const batchModeRadios = document.querySelectorAll('input[name="batch-mode"]');
+    const batchTagInput = document.getElementById('batch-tag-input');
+    const batchAutocompleteDropdown = document.getElementById('batch-autocomplete-dropdown');
+    const batchAutocompleteItems = document.getElementById('batch-autocomplete-items');
 
     // Manual Accelerator Elements
     const manualAccelToggle = document.getElementById('manual-accelerator');
@@ -168,7 +196,9 @@ document.addEventListener('DOMContentLoaded', () => {
         activeIndex: 0,
         loading: false,
         savingTags: false,
-        viewMode: 'grid'
+        viewMode: 'grid',
+        selected: new Set(),
+        inlineEditorIndex: null
     };
 
     // ----- Slider Progress -----
@@ -397,13 +427,23 @@ document.addEventListener('DOMContentLoaded', () => {
         viewerResults.innerHTML = '';
 
         viewerState.images.forEach((item, index) => {
-            const card = document.createElement('button');
-            card.type = 'button';
+            const card = document.createElement('div');
             card.dataset.viewerIndex = String(index);
+            card.setAttribute('role', 'button');
+            card.tabIndex = 0;
             const tagBlock = renderViewerTags(item, viewerState.viewMode === 'grid' ? 4 : 6);
+            const batchControls = `
+                    <div class="flex items-center gap-2 mt-2">
+                        <label class="batch-select-label inline-flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors" title="Select for batch tagging">
+                            <input type="checkbox" class="batch-select-box w-3.5 h-3.5" data-viewer-index="${index}" ${viewerState.selected.has(index) ? 'checked' : ''}>
+                            <span>Select</span>
+                        </label>
+                        <button type="button" class="inline-tag-edit-btn text-xs text-blue-600 dark:text-blue-400 hover:underline" data-viewer-index="${index}" aria-label="Edit tags inline">Quick edit</button>
+                    </div>
+            `;
 
             if (viewerState.viewMode === 'grid') {
-                card.className = 'group overflow-hidden rounded-xl border border-border/60 bg-background text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary';
+                card.className = `group relative overflow-hidden rounded-xl border border-border/60 bg-background text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary${viewerState.selected.has(index) ? ' batch-selected' : ''}`;
                 card.innerHTML = `
                     <div class="aspect-[4/3] overflow-hidden bg-muted/30">
                         <img src="${getViewerImageUrl(item.path)}" alt="${escapeHtml(item.name)}"
@@ -412,13 +452,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="space-y-3 p-4">
                         <div class="space-y-1">
                             <p class="truncate text-sm font-semibold text-foreground">${escapeHtml(item.name)}</p>
-                            <p class="text-xs text-muted-foreground">${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}</p>
+                            <p class="text-xs text-muted-foreground viewer-tag-count">${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}</p>
                         </div>
-                        <div class="flex flex-wrap gap-2">${tagBlock}</div>
+                        <div class="tag-row flex flex-wrap gap-2">${tagBlock}</div>
+                        ${batchControls}
                     </div>
                 `;
             } else {
-                card.className = 'group flex w-full items-start gap-4 rounded-xl border border-border/60 bg-background p-4 text-left shadow-sm transition-all hover:border-primary/40 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary';
+                card.className = `group relative flex w-full items-start gap-4 rounded-xl border border-border/60 bg-background p-4 text-left shadow-sm transition-all hover:border-primary/40 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary${viewerState.selected.has(index) ? ' batch-selected' : ''}`;
                 card.innerHTML = `
                     <div class="h-24 w-32 shrink-0 overflow-hidden rounded-lg bg-muted/30">
                         <img src="${getViewerImageUrl(item.path)}" alt="${escapeHtml(item.name)}"
@@ -430,14 +471,31 @@ document.addEventListener('DOMContentLoaded', () => {
                                 <p class="truncate text-sm font-semibold text-foreground">${escapeHtml(item.name)}</p>
                                 <p class="truncate text-xs text-muted-foreground font-mono">${escapeHtml(item.path)}</p>
                             </div>
-                            <span class="text-xs text-muted-foreground">${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}</span>
+                            <span class="text-xs text-muted-foreground viewer-tag-count">${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}</span>
                         </div>
-                        <div class="flex flex-wrap gap-2">${tagBlock}</div>
+                        <div class="tag-row flex flex-wrap gap-2">${tagBlock}</div>
+                        ${batchControls}
                     </div>
                 `;
             }
 
-            card.addEventListener('click', () => openLightboxAt(index));
+            card.addEventListener('click', (event) => {
+                if (event.shiftKey) {
+                    event.preventDefault();
+                    toggleBatchSelect(index);
+                    return;
+                }
+                if (event.target.closest('.batch-select-label') || event.target.closest('.inline-tag-edit-btn') || event.target.closest('.inline-tag-popover')) {
+                    return;
+                }
+                openLightboxAt(index);
+            });
+            card.addEventListener('keydown', (event) => {
+                if ((event.key === 'Enter' || event.key === ' ') && event.target === card) {
+                    event.preventDefault();
+                    openLightboxAt(index);
+                }
+            });
             viewerResults.appendChild(card);
         });
 
@@ -450,6 +508,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        closeLightboxAutocomplete();
         lightboxPosition.textContent = `${viewerState.activeIndex + 1} / ${viewerState.images.length}`;
         lightboxTagCount.textContent = `${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}`;
         lightboxTitle.textContent = item.name;
@@ -460,6 +519,7 @@ document.addEventListener('DOMContentLoaded', () => {
         lightboxImage.src = getViewerImageUrl(item.path);
         lightboxImage.alt = item.name;
         renderLightboxTags();
+        renderTaxonomyChipStates(item);
         lightboxPrevBtn.disabled = viewerState.activeIndex === 0;
         lightboxNextBtn.disabled = viewerState.activeIndex >= viewerState.images.length - 1;
     }
@@ -496,11 +556,11 @@ document.addEventListener('DOMContentLoaded', () => {
         return data.tags || [];
     }
 
-    async function commitLightboxTags(tags, controlEl) {
+    async function commitTagsAtIndex(index, tags, controlEl, errorEl = null) {
         if (viewerState.savingTags) {
             return;
         }
-        const item = viewerState.images[viewerState.activeIndex];
+        const item = viewerState.images[index];
         if (!item) {
             return;
         }
@@ -510,21 +570,31 @@ document.addEventListener('DOMContentLoaded', () => {
             controlEl.disabled = true;
         }
         setLightboxTagError('');
+        if (errorEl) {
+            errorEl.textContent = '';
+            errorEl.classList.add('hidden');
+        }
 
         try {
             const updated = await persistLightboxTags(item.path, tags);
-            updateViewerRecordTags(viewerState.activeIndex, updated);
-            renderViewerGallery();
-            renderLightbox();
+            updateViewerRecordTags(index, updated);
+            refreshItemDisplays(index);
         } catch (error) {
             setLightboxTagError(error.message);
-            renderLightboxTags();
+            if (errorEl) {
+                errorEl.textContent = error.message;
+                errorEl.classList.remove('hidden');
+            }
         } finally {
             viewerState.savingTags = false;
             if (controlEl) {
                 controlEl.disabled = false;
             }
         }
+    }
+
+    async function commitLightboxTags(tags, controlEl) {
+        await commitTagsAtIndex(viewerState.activeIndex, tags, controlEl);
     }
 
     function lightboxTagActionButton(className, label, iconPaths, handler) {
@@ -674,6 +744,744 @@ document.addEventListener('DOMContentLoaded', () => {
 
         viewerState.activeIndex = nextIndex;
         renderLightbox();
+    }
+
+    // =====================================================================
+    // Rapid tagging suite: Quick-Chips, Rapid Key-Decision overlay, Smart
+    // Autocomplete, Batch Apply, Inline Tag Editor. All taxonomy writes go
+    // through /api/tags/user (axis attribution) plus a keyword union in the
+    // XMP sidecar so DAM tools see the human label immediately.
+    // =====================================================================
+
+    const AXIS_CHIP_CONTAINER_IDS = {
+        process: 'taxonomy-chips-process',
+        geometry_kind: 'taxonomy-chips-geometry',
+        material_family: 'taxonomy-chips-material',
+        machine_context: 'taxonomy-chips-machine',
+        output_intent: 'taxonomy-chips-output'
+    };
+    const AXIS_HOTKEYS = { p: 'process', g: 'geometry_kind', m: 'material_family', c: 'machine_context', o: 'output_intent' };
+
+    let rapidAxis = null;
+    let batchMode = 'add';
+    let pendingBatchRecords = [];
+    let activeAutocompletes = [];
+
+    // Taxonomy fetched from /api/taxonomy; axisDefByKey maps axis -> (key -> label).
+    let taxonomyAxes = [];
+    const axisDefByKey = new Map();
+
+    function closeLightboxAutocomplete() {
+        if (lightboxAutocompleteDropdown) {
+            lightboxAutocompleteDropdown.classList.add('hidden');
+        }
+    }
+
+    // ----- Smart Autocomplete -----
+
+    function buildAutocomplete(inputEl, dropdownEl, itemsEl, options = {}) {
+        const state = { items: [], activeIndex: -1 };
+        const currentImage = () => viewerState.images[viewerState.activeIndex];
+        const excludeLabels = () => {
+            if (options.excludeFrom === 'batch') return pendingBatchRecords.map((r) => r.label);
+            const item = currentImage();
+            return item ? item.tags : [];
+        };
+
+        const close = () => {
+            dropdownEl.classList.add('hidden');
+            state.items = [];
+            state.activeIndex = -1;
+        };
+
+        function renderDropdown() {
+            const query = inputEl.value;
+            const exclude = new Set(excludeLabels());
+            state.items = getSuggestions(query, exclude);
+            if (!query.trim() && options.showRecentsOnEmpty) {
+                const seen = new Set(exclude);
+                state.items = recentTagList
+                    .filter((label) => !seen.has(label.toLowerCase()))
+                    .slice(0, 6)
+                    .map((label) => ({ label, source: 'recent' }));
+            }
+            state.activeIndex = state.items.length ? 0 : -1;
+            if (!state.items.length) {
+                close();
+                return;
+            }
+            itemsEl.innerHTML = state.items.map((item, i) => `
+                <button type="button" class="autocomplete-item${i === state.activeIndex ? ' is-highlighted' : ''}" data-ac-index="${i}" data-source="${item.source}">
+                    <span class="ac-source" data-source="${item.source}">${escapeHtml(item.source === 'taxonomy' ? (options.axisShortLabels?.[item.axis] || 'taxonomy') : item.source)}</span>
+                    <span class="ac-label">${highlightMatch(item.label, query)}</span>
+                </button>
+            `).join('');
+            dropdownEl.classList.remove('hidden');
+        }
+
+        function setActive(index) {
+            if (!state.items.length) return;
+            state.activeIndex = (index + state.items.length) % state.items.length;
+            itemsEl.querySelectorAll('.autocomplete-item').forEach((el, i) => {
+                el.classList.toggle('is-highlighted', i === state.activeIndex);
+            });
+            const active = itemsEl.querySelector('.autocomplete-item.is-highlighted');
+            if (active) active.scrollIntoView({ block: 'nearest' });
+        }
+
+        async function pick(index) {
+            const item = state.items[index];
+            if (!item) return;
+            close();
+            if (typeof options.onPick === 'function') {
+                await options.onPick(item);
+            }
+        }
+
+        inputEl.addEventListener('input', renderDropdown);
+        inputEl.addEventListener('focus', renderDropdown);
+        inputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                setActive(state.activeIndex + 1);
+            } else if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                setActive(state.activeIndex - 1);
+            } else if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation();
+                if (state.activeIndex >= 0 && dropdownEl && !dropdownEl.classList.contains('hidden')) {
+                    pick(state.activeIndex);
+                } else if (typeof options.onEmptySubmit === 'function') {
+                    options.onEmptySubmit();
+                }
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                close();
+            } else if (event.key === 'Tab' && state.activeIndex >= 0 && !dropdownEl.classList.contains('hidden')) {
+                event.preventDefault();
+                pick(state.activeIndex);
+            }
+        });
+
+        itemsEl.addEventListener('mousedown', (event) => {
+            const button = event.target.closest('.autocomplete-item');
+            if (!button) return;
+            event.preventDefault();
+            pick(parseInt(button.dataset.acIndex, 10));
+        });
+
+        activeAutocompletes.push({ inputEl, dropdownEl, close, dispose: () => close() });
+        return { close, state };
+    }
+
+    document.addEventListener('click', (event) => {
+        activeAutocompletes.forEach((ac) => {
+            if (!ac.inputEl.contains(event.target) && !ac.dropdownEl.contains(event.target)) {
+                ac.close();
+            }
+        });
+    });
+
+    // Escape first closes an open suggestion dropdown instead of the whole dialog.
+    document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        const ac = activeAutocompletes.find((a) =>
+            a.dropdownEl && !a.dropdownEl.classList.contains('hidden')
+            && (a.inputEl === document.activeElement || a.dropdownEl.contains(document.activeElement)));
+        if (ac) {
+            event.preventDefault();
+            event.stopPropagation();
+            ac.close();
+        }
+    }, true);
+
+    // ----- Taxonomy Quick-Chips (lightbox sidebar) -----
+
+    function buildTaxonomyChips() {
+        taxonomyAxes.forEach((axisDef) => {
+            const container = document.getElementById(AXIS_CHIP_CONTAINER_IDS[axisDef.axis]);
+            if (!container) return;
+            container.innerHTML = axisDef.values.map((value) => `
+                <button type="button" class="tax-chip" data-axis="${axisDef.axis}" data-key="${value.key}" title="Apply ${escapeHtml(value.label)} to the current image">
+                    ${escapeHtml(value.label)}
+                </button>
+            `).join('');
+        });
+    }
+
+    function renderTaxonomyChipStates(item) {
+        const tags = new Set((item?.tags || []).map((t) => t.toLowerCase()));
+        document.querySelectorAll('#taxonomy-quick-chips .tax-chip').forEach((chip) => {
+            const label = axisValueLabel(chip.dataset.axis, chip.dataset.key);
+            chip.classList.toggle('is-active', tags.has(label.toLowerCase()));
+        });
+    }
+
+    async function putUserTaxonomyTag(path, axis, key) {
+        const send = () => fetch('/api/tags/user', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, axis, key })
+        });
+        let res = await send();
+        if (res.status === 429) {
+            // Server rate-limits taxonomy writes (60 / 10s); wait out the window once.
+            await new Promise((resolve) => setTimeout(resolve, 1100));
+            res = await send();
+        }
+        const data = await readJson(res);
+        if (!res.ok) {
+            throw new Error(data.detail || `Failed to record ${axis} tag.`);
+        }
+        return data;
+    }
+
+    async function applyAxisTagToIndex(index, axis, key) {
+        const item = viewerState.images[index];
+        if (!item || viewerState.savingTags) return;
+        const label = axisValueLabel(axis, key);
+        viewerState.savingTags = true;
+        setLightboxTagError('');
+        try {
+            await putUserTaxonomyTag(item.path, axis, key);
+            if (!item.tags.some((t) => t.toLowerCase() === label.toLowerCase())) {
+                const updated = await persistLightboxTags(item.path, [...item.tags, label]);
+                updateViewerRecordTags(index, updated);
+            }
+            addRecentTag(label);
+            refreshItemDisplays(index);
+        } catch (error) {
+            setLightboxTagError(error.message);
+        } finally {
+            viewerState.savingTags = false;
+        }
+    }
+
+    async function toggleAxisChip(chip) {
+        const item = viewerState.images[viewerState.activeIndex];
+        if (!item) return;
+        const label = axisValueLabel(chip.dataset.axis, chip.dataset.key);
+        if (item.tags.some((t) => t.toLowerCase() === label.toLowerCase())) {
+            const tags = item.tags.filter((t) => t.toLowerCase() !== label.toLowerCase());
+            await commitTagsAtIndex(viewerState.activeIndex, tags);
+            return;
+        }
+        await applyAxisTagToIndex(viewerState.activeIndex, chip.dataset.axis, chip.dataset.key);
+    }
+
+    // ----- Rapid Key-Decision overlay -----
+
+    function openRapidOverlay(axis) {
+        const axisDef = taxonomyAxes.find((a) => a.axis === axis);
+        if (!axisDef) return;
+        rapidAxis = axis;
+        rapidAxisName.textContent = `— ${axisDef.label}`;
+        rapidOverlayGrid.innerHTML = axisDef.values.map((value, i) => `
+            <button type="button" class="rapid-option" data-key="${value.key}" title="${escapeHtml(value.label)}">
+                <span class="rapid-key">${i < 9 ? i + 1 : '•'}</span>
+                <span class="rapid-value">${escapeHtml(value.label)}</span>
+            </button>
+        `).join('');
+        rapidOverlayGrid.querySelectorAll('.rapid-option').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                requestDialogClose(rapidOverlayDialog);
+                await applyAxisTagToIndex(viewerState.activeIndex, axis, btn.dataset.key);
+            });
+        });
+        openDialog(rapidOverlayDialog, { opener: document.activeElement });
+    }
+
+    // ----- Inline Tag Editor (gallery popover, no lightbox needed) -----
+
+    function closeInlineEditor() {
+        if (viewerState.inlineEditorIndex === null) return;
+        viewerState.inlineEditorIndex = null;
+        document.querySelector('.inline-tag-popover')?.remove();
+        activeAutocompletes = activeAutocompletes.filter((ac) => document.contains(ac.inputEl));
+        renderViewerGallery();
+    }
+
+    function renderInlineEditorTags(index, panel) {
+        const item = viewerState.images[index];
+        if (!item) return;
+        const list = panel.querySelector('.inline-tags');
+        list.innerHTML = '';
+        if (!item.tags.length) {
+            list.innerHTML = '<span class="text-xs text-muted-foreground">No tags yet.</span>';
+        }
+        item.tags.forEach((tag, tagIndex) => {
+            const chip = document.createElement('span');
+            chip.className = 'badge-secondary inline-flex items-center gap-1';
+            const label = document.createElement('span');
+            label.textContent = tag;
+            chip.appendChild(label);
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'rounded p-0.5 text-muted-foreground hover:text-destructive';
+            remove.setAttribute('aria-label', `Remove tag ${tag}`);
+            remove.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+            remove.addEventListener('click', async (event) => {
+                event.stopPropagation();
+                const tags = viewerState.images[index].tags.slice();
+                tags.splice(tagIndex, 1);
+                await commitTagsAtIndex(index, tags, null, panel.querySelector('.inline-tag-error'));
+            });
+            chip.appendChild(remove);
+            list.appendChild(chip);
+        });
+    }
+
+    function openInlineTagEditor(card, index) {
+        if (viewerState.inlineEditorIndex === index) {
+            closeInlineEditor();
+            return;
+        }
+        closeInlineEditor();
+
+        const item = viewerState.images[index];
+        if (!item) return;
+
+        const panel = document.createElement('div');
+        panel.className = 'inline-tag-popover inline-tag-editor fixed z-50 w-72 rounded-xl border border-border bg-background p-3 shadow-xl space-y-2';
+        panel.innerHTML = `
+            <div class="flex items-center justify-between gap-2">
+                <span class="truncate text-xs font-semibold">${escapeHtml(item.name)}</span>
+                <button type="button" class="inline-close btn-sm-ghost h-6 px-1" aria-label="Close editor">✕</button>
+            </div>
+            <div class="inline-tags flex max-h-32 flex-wrap gap-1.5 overflow-y-auto"></div>
+            <div class="inline-tag-error text-xs text-destructive hidden"></div>
+            <div class="relative">
+                <input type="text" class="input text-xs w-full" placeholder="Add tag (type to search)…" maxlength="64" autocomplete="off">
+                <div class="dropdown hidden absolute left-0 right-0 top-full mt-1 z-50 max-h-48 overflow-y-auto overflow-hidden rounded-lg border border-border bg-background shadow-xl text-sm">
+                    <div class="items"></div>
+                </div>
+            </div>
+            <p class="text-[10px] text-muted-foreground">Changes save instantly to the XMP sidecar.</p>
+        `;
+        document.body.appendChild(panel);
+
+        const rect = card.getBoundingClientRect();
+        const panelWidth = 288;
+        let left = Math.min(rect.left, window.innerWidth - panelWidth - 12);
+        left = Math.max(8, left);
+        let top = rect.bottom + 6;
+        const panelHeight = 260;
+        if (top + panelHeight > window.innerHeight) {
+            top = Math.max(8, rect.top - panelHeight - 6);
+        }
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+
+        viewerState.inlineEditorIndex = index;
+        renderInlineEditorTags(index, panel);
+
+        const input = panel.querySelector('input');
+        const dropdown = panel.querySelector('.dropdown');
+        const itemsBox = panel.querySelector('.items');
+        buildAutocomplete(input, dropdown, itemsBox, {
+            showRecentsOnEmpty: true,
+            onPick: async (suggestion) => {
+                if (suggestion.source === 'taxonomy' && suggestion.axis) {
+                    await applyAxisTagToIndex(index, suggestion.axis, suggestion.key);
+                } else {
+                    if (!viewerState.images[index].tags.includes(suggestion.label)) {
+                        await commitTagsAtIndex(index, [...viewerState.images[index].tags, suggestion.label], null, panel.querySelector('.inline-tag-error'));
+                    }
+                    addRecentTag(suggestion.label);
+                }
+                input.value = '';
+                renderInlineEditorTags(index, panel);
+            },
+            onEmptySubmit: async () => {
+                const value = input.value.trim();
+                if (!value) return;
+                if (viewerState.images[index].tags.includes(value)) return;
+                await commitTagsAtIndex(index, [...viewerState.images[index].tags, value], null, panel.querySelector('.inline-tag-error'));
+                addRecentTag(value);
+                input.value = '';
+                renderInlineEditorTags(index, panel);
+            }
+        });
+
+        panel.addEventListener('click', (event) => event.stopPropagation());
+        panel.querySelector('.inline-close').addEventListener('click', (event) => {
+            event.stopPropagation();
+            closeInlineEditor();
+        });
+        input.focus();
+
+        const closer = (event) => {
+            if (panel.contains(event.target) || event.target.closest('.inline-tag-edit-btn')) return;
+            closeInlineEditor();
+        };
+        document.addEventListener('mousedown', closer);
+        const scrollCloser = () => closeInlineEditor();
+        window.addEventListener('scroll', scrollCloser, { once: true, passive: true });
+        const cleanupObserver = new MutationObserver(() => {
+            if (!document.contains(panel)) {
+                document.removeEventListener('mousedown', closer);
+                cleanupObserver.disconnect();
+            }
+        });
+        cleanupObserver.observe(document.body, { childList: true });
+    }
+
+    // ----- Batch selection + Batch Apply -----
+
+    function toggleBatchSelect(index) {
+        if (viewerState.selected.has(index)) {
+            viewerState.selected.delete(index);
+        } else {
+            viewerState.selected.add(index);
+        }
+        syncBatchSelectionUI();
+    }
+
+    function syncBatchSelectionUI() {
+        const count = viewerState.selected.size;
+        viewerResults.querySelectorAll('.batch-select-box').forEach((box) => {
+            const idx = parseInt(box.dataset.viewerIndex, 10);
+            box.checked = viewerState.selected.has(idx);
+            box.closest('.group')?.classList.toggle('batch-selected', viewerState.selected.has(idx));
+        });
+        if (batchToolbar) {
+            batchToolbar.classList.toggle('hidden', count === 0);
+        }
+        if (batchCountLabel) {
+            batchCountLabel.textContent = `${count} image${count === 1 ? '' : 's'} selected`;
+        }
+    }
+
+    function getBatchMode() {
+        const checked = Array.from(batchModeRadios).find((radio) => radio.checked);
+        return checked?.value === 'remove' ? 'remove' : 'add';
+    }
+
+    function renderBatchPending() {
+        if (!batchPendingBox) return;
+        if (!pendingBatchRecords.length) {
+            batchPendingBox.innerHTML = '<span class="text-xs text-muted-foreground">No tags queued yet — pick suggestions or taxonomy chips below.</span>';
+            return;
+        }
+        batchPendingBox.innerHTML = '';
+        pendingBatchRecords.forEach((record, i) => {
+            const chip = document.createElement('span');
+            chip.className = 'badge-secondary inline-flex items-center gap-1';
+            const label = document.createElement('span');
+            label.textContent = record.type === 'axis' ? `${axisValueLabel(record.axis, record.key)} (${record.axis.replace('_', ' ')})` : record.label;
+            chip.appendChild(label);
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'rounded p-0.5 text-muted-foreground hover:text-destructive';
+            remove.setAttribute('aria-label', 'Remove queued tag');
+            remove.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+            remove.addEventListener('click', () => {
+                pendingBatchRecords.splice(i, 1);
+                renderBatchPending();
+            });
+            chip.appendChild(remove);
+            batchPendingBox.appendChild(chip);
+        });
+    }
+
+    function buildBatchTaxChips() {
+        if (!batchTaxChips) return;
+        batchTaxChips.innerHTML = taxonomyAxes.map((axisDef) => `
+            <div class="space-y-1.5">
+                <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">${escapeHtml(axisDef.label)}</p>
+                <div class="flex flex-wrap gap-1.5">
+                    ${axisDef.values.map((value) => `
+                        <button type="button" class="tax-chip" data-axis="${axisDef.axis}" data-key="${value.key}">${escapeHtml(value.label)}</button>
+                    `).join('')}
+                </div>
+            </div>
+        `).join('');
+        batchTaxChips.querySelectorAll('.tax-chip').forEach((chip) => {
+            chip.addEventListener('click', () => {
+                const axis = chip.dataset.axis;
+                const key = chip.dataset.key;
+                if (pendingBatchRecords.some((r) => r.type === 'axis' && r.axis === axis && r.key === key)) return;
+                pendingBatchRecords.push({ type: 'axis', axis, key, label: axisValueLabel(axis, key) });
+                renderBatchPending();
+            });
+        });
+    }
+
+    function openBatchApplyDialog(mode) {
+        if (!viewerState.selected.size) {
+            setActiveView('viewer');
+            setViewerError('Select at least one image (checkbox or Shift+click) to batch-apply tags.');
+            return;
+        }
+        batchMode = mode === 'remove' ? 'remove' : 'add';
+        pendingBatchRecords = [];
+        const checkedRadio = Array.from(batchModeRadios).find((radio) => radio.value === batchMode);
+        if (checkedRadio) checkedRadio.checked = true;
+        syncBatchModeUI();
+        renderBatchPending();
+        if (batchApplyDesc) {
+            batchApplyDesc.textContent = `${viewerState.selected.size} image${viewerState.selected.size === 1 ? '' : 's'} selected. ${
+                batchMode === 'add'
+                    ? 'Queued tags are merged into each image\u2019s XMP keywords; taxonomy picks also update the axis record.'
+                    : 'Queued tags are removed from each selected image\u2019s XMP keywords.'
+            }`;
+        }
+        if (batchTagInput) batchTagInput.value = '';
+        openDialog(batchApplyDialog, { opener: batchApplyOpenBtn || document.activeElement });
+    }
+
+    function syncBatchModeUI() {
+        if (batchRemoveNote) {
+            batchRemoveNote.classList.toggle('hidden', batchMode !== 'remove');
+        }
+    }
+
+    async function runBatchApply() {
+        if (!pendingBatchRecords.length || !viewerState.selected.size) {
+            return;
+        }
+        const indices = Array.from(viewerState.selected).filter((i) => viewerState.images[i]);
+        const records = pendingBatchRecords.slice();
+        const removeLabels = new Set(records.map((r) => r.label.toLowerCase()));
+        const axisRecords = records.filter((r) => r.type === 'axis');
+        const failures = [];
+
+        batchApplyConfirmBtn.disabled = true;
+        const originalLabel = batchApplyConfirmBtn.textContent;
+        batchApplyConfirmBtn.textContent = 'Applying…';
+
+        for (const [done, index] of indices.entries()) {
+            batchApplyConfirmBtn.textContent = `Applying ${done + 1}/${indices.length}…`;
+            const item = viewerState.images[index];
+            try {
+                if (batchMode === 'add') {
+                    for (const record of axisRecords) {
+                        await putUserTaxonomyTag(item.path, record.axis, record.key);
+                    }
+                    const merged = new Set(item.tags);
+                    records.forEach((r) => merged.add(r.label));
+                    if (merged.size !== item.tags.length) {
+                        const updated = await persistLightboxTags(item.path, Array.from(merged));
+                        updateViewerRecordTags(index, updated);
+                        records.forEach((r) => addRecentTag(r.label));
+                    }
+                } else {
+                    const remaining = item.tags.filter((t) => !removeLabels.has(t.toLowerCase()));
+                    if (remaining.length !== item.tags.length) {
+                        const updated = await persistLightboxTags(item.path, remaining);
+                        updateViewerRecordTags(index, updated);
+                    }
+                }
+            } catch (error) {
+                failures.push(`${item.name}: ${error.message}`);
+            }
+            if (batchMode === 'add' && axisRecords.length && indices.length > 12) {
+                // Pace writes so batches stay under the server's 60-writes/10s rate limit.
+                await new Promise((resolve) => setTimeout(resolve, 150));
+            }
+        }
+
+        batchApplyConfirmBtn.disabled = false;
+        batchApplyConfirmBtn.textContent = originalLabel;
+        viewerState.selected.clear();
+        requestDialogClose(batchApplyDialog);
+        renderViewerGallery();
+        syncBatchSelectionUI();
+        if (failures.length) {
+            setViewerError(`Batch apply finished with ${failures.length} error(s): ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}`);
+        }
+    }
+
+    // ----- Targeted refresh after a per-image tag commit -----
+
+    function refreshItemDisplays(index) {
+        const item = viewerState.images[index];
+        if (!item) return;
+
+        const card = viewerResults.querySelector(`[data-viewer-index="${index}"]`);
+        if (card) {
+            const row = card.querySelector('.tag-row');
+            if (row) {
+                row.innerHTML = renderViewerTags(item, viewerState.viewMode === 'grid' ? 4 : 6);
+            }
+            const count = card.querySelector('.viewer-tag-count');
+            if (count) {
+                count.textContent = `${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}`;
+            }
+        }
+
+        if (viewerState.inlineEditorIndex === index) {
+            const panel = document.querySelector('.inline-tag-popover');
+            if (panel) renderInlineEditorTags(index, panel);
+        }
+
+        if (lightboxDialog.open && viewerState.activeIndex === index) {
+            lightboxTagCount.textContent = `${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}`;
+            renderLightboxTags();
+            renderTaxonomyChipStates(item);
+        }
+    }
+
+    // ----- Taxonomy fetch (server is source of truth) -----
+
+    async function loadTaxonomyFromServer() {
+        try {
+            const res = await fetch('/api/taxonomy');
+            const data = await readJson(res);
+            const axes = data?.taxonomy?.axes;
+            if (!Array.isArray(axes) || !axes.length) return;
+            taxonomyAxes = axes.map((axisDef) => ({
+                axis: axisDef.axis,
+                label: axisDef.label || titleizeKey(axisDef.axis),
+                values: (axisDef.values || []).map((value) => (
+                    typeof value === 'string' ? { key: value, label: titleizeKey(value) } : { key: value.key, label: value.label || titleizeKey(value.key) }
+                ))
+            }));
+            axisDefByKey.clear();
+            taxonomyAxes.forEach((axisDef) => {
+                axisDefByKey.set(axisDef.axis, new Map(axisDef.values.map((value) => [value.key, value.label])));
+            });
+            buildTaxonomyChips();
+            buildBatchTaxChips();
+            if (lightboxDialog.open) {
+                renderTaxonomyChipStates(viewerState.images[viewerState.activeIndex]);
+            }
+        } catch (_) { /* keep the built-in fallback mirror */ }
+    }
+
+    // ----- Rapid suite wiring -----
+
+    document.getElementById('taxonomy-quick-chips')?.addEventListener('click', (event) => {
+        const chip = event.target.closest('.tax-chip');
+        if (!chip) return;
+        event.preventDefault();
+        toggleAxisChip(chip);
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (rapidOverlayDialog?.open) {
+            const digit = parseInt(event.key, 10);
+            if (!Number.isNaN(digit)) {
+                const optionIndex = digit === 0 ? 9 : digit - 1;
+                const options = rapidOverlayGrid.querySelectorAll('.rapid-option');
+                if (options[optionIndex]) {
+                    event.preventDefault();
+                    const axis = rapidAxis;
+                    const key = options[optionIndex].dataset.key;
+                    requestDialogClose(rapidOverlayDialog);
+                    applyAxisTagToIndex(viewerState.activeIndex, axis, key);
+                }
+            }
+            return;
+        }
+
+        if (!lightboxDialog.open || batchApplyDialog?.open) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+
+        const key = event.key.toLowerCase();
+        if (AXIS_HOTKEYS[key]) {
+            event.preventDefault();
+            openRapidOverlay(AXIS_HOTKEYS[key]);
+            return;
+        }
+        if (key === '/' || key === 'a') {
+            event.preventDefault();
+            lightboxNewTagInput.focus();
+            lightboxNewTagInput.select();
+            return;
+        }
+        if (key === 'n' && !event.shiftKey) {
+            event.preventDefault();
+            moveLightbox(1);
+        } else if (key === 'b') {
+            event.preventDefault();
+            moveLightbox(-1);
+        }
+    });
+
+    viewerResults.addEventListener('change', (event) => {
+        const box = event.target.closest('.batch-select-box');
+        if (!box) return;
+        const idx = parseInt(box.dataset.viewerIndex, 10);
+        if (box.checked) {
+            viewerState.selected.add(idx);
+        } else {
+            viewerState.selected.delete(idx);
+        }
+        syncBatchSelectionUI();
+    });
+
+    viewerResults.addEventListener('click', (event) => {
+        const editBtn = event.target.closest('.inline-tag-edit-btn');
+        if (!editBtn) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const idx = parseInt(editBtn.dataset.viewerIndex, 10);
+        const card = viewerResults.querySelector(`[data-viewer-index="${idx}"]`);
+        if (card) openInlineTagEditor(card, idx);
+    });
+
+    batchSelectAllBtn?.addEventListener('click', () => {
+        viewerState.images.forEach((_, index) => viewerState.selected.add(index));
+        syncBatchSelectionUI();
+    });
+    batchClearBtn?.addEventListener('click', () => {
+        viewerState.selected.clear();
+        syncBatchSelectionUI();
+    });
+    batchApplyOpenBtn?.addEventListener('click', () => openBatchApplyDialog('add'));
+    batchRemoveOpenBtn?.addEventListener('click', () => openBatchApplyDialog('remove'));
+    lightboxBatchApplyBtn?.addEventListener('click', () => {
+        if (!viewerState.selected.size) {
+            setLightboxTagError('No images selected for batch apply. Close the viewer and select thumbnails first.');
+            return;
+        }
+        openBatchApplyDialog('add');
+    });
+    batchApplyConfirmBtn?.addEventListener('click', () => runBatchApply());
+    Array.from(batchModeRadios || []).forEach((radio) => {
+        radio.addEventListener('change', () => {
+            batchMode = getBatchMode();
+            syncBatchModeUI();
+        });
+    });
+
+    buildTaxonomyChips();
+    buildBatchTaxChips();
+    loadTaxonomyFromServer();
+
+    // Smart Autocomplete Bar inside the Batch Apply dialog.
+    if (batchTagInput) {
+        buildAutocomplete(batchTagInput, batchAutocompleteDropdown, batchAutocompleteItems, {
+            showRecentsOnEmpty: true,
+            excludeFrom: 'batch',
+            onPick: (suggestion) => {
+                if (suggestion.source === 'taxonomy' && suggestion.axis) {
+                    if (!pendingBatchRecords.some((r) => r.type === 'axis' && r.axis === suggestion.axis && r.key === suggestion.key)) {
+                        pendingBatchRecords.push({ type: 'axis', axis: suggestion.axis, key: suggestion.key, label: suggestion.label });
+                    }
+                } else if (!pendingBatchRecords.some((r) => r.type === 'keyword' && r.label.toLowerCase() === suggestion.label.toLowerCase())) {
+                    pendingBatchRecords.push({ type: 'keyword', label: suggestion.label });
+                }
+                addRecentTag(suggestion.label);
+                renderBatchPending();
+                batchTagInput.value = '';
+                batchTagInput.focus();
+            },
+            onEmptySubmit: () => {
+                const value = batchTagInput.value.trim();
+                if (!value) return;
+                if (!pendingBatchRecords.some((r) => r.label.toLowerCase() === value.toLowerCase())) {
+                    pendingBatchRecords.push({ type: 'keyword', label: value });
+                }
+                addRecentTag(value);
+                renderBatchPending();
+                batchTagInput.value = '';
+            }
+        });
     }
 
     // ----- Initialization -----
@@ -953,6 +1761,8 @@ document.addEventListener('DOMContentLoaded', () => {
     wireDialog(accelDialog);
     wireDialog(filePickerDialog);
     wireDialog(lightboxDialog);
+    wireDialog(rapidOverlayDialog);
+    wireDialog(batchApplyDialog);
 
     // Dialog openers — native showModal()
     helpBtn.addEventListener('click', () => openDialog(helpDialog, {
@@ -1052,15 +1862,23 @@ document.addEventListener('DOMContentLoaded', () => {
     lightboxPrevBtn.addEventListener('click', () => moveLightbox(-1));
     lightboxNextBtn.addEventListener('click', () => moveLightbox(1));
     lightboxAddTagBtn.addEventListener('click', addLightboxTag);
-    lightboxNewTagInput.addEventListener('keydown', (event) => {
-        event.stopPropagation();
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            addLightboxTag();
-        } else if (event.key === 'Escape') {
-            event.preventDefault();
-            requestDialogClose(lightboxDialog);
-        }
+
+    // Smart Autocomplete Bar on the lightbox tag input.
+    buildAutocomplete(lightboxNewTagInput, lightboxAutocompleteDropdown, lightboxAutocompleteItems, {
+        showRecentsOnEmpty: true,
+        onPick: async (suggestion) => {
+            if (viewerState.savingTags) return;
+            const item = viewerState.images[viewerState.activeIndex];
+            if (!item) return;
+            if (suggestion.source === 'taxonomy' && suggestion.axis) {
+                await applyAxisTagToIndex(viewerState.activeIndex, suggestion.axis, suggestion.key);
+            } else if (!item.tags.includes(suggestion.label)) {
+                await commitLightboxTags([...item.tags, suggestion.label]);
+                addRecentTag(suggestion.label);
+            }
+            lightboxNewTagInput.value = '';
+        },
+        onEmptySubmit: () => addLightboxTag()
     });
     document.addEventListener('keydown', (event) => {
         if (!lightboxDialog.open) {
@@ -1173,6 +1991,8 @@ document.addEventListener('DOMContentLoaded', () => {
             viewerState.offset = 0;
             viewerState.hasMore = false;
             viewerState.currentPath = path;
+            viewerState.selected.clear();
+            closeInlineEditor();
             viewerSummary.textContent = 'Loading files...';
             viewerCountBadge.textContent = 'Loading...';
             setViewerEmptyState('Loading files...', 'Gathering image previews and XMP tags for the selected folder.');

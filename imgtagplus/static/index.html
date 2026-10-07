@@ -11,6 +11,7 @@
     <script src="/static/theme.js"></script>
     <!-- Basecoat CSS CDN Setup -->
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/taxonomy-ui.css">
 </head>
 
 <body class="bg-background text-foreground antialiased min-h-screen flex flex-col font-sans">
@@ -359,6 +360,16 @@
                     </div>
                 </header>
                 <section class="space-y-4">
+                    <!-- Batch selection toolbar -->
+                    <div id="batch-toolbar" class="batch-toolbar hidden">
+                        <span id="batch-count" class="text-sm font-medium">0 images selected</span>
+                        <div class="ml-auto flex flex-wrap items-center gap-2">
+                            <button id="batch-select-all-btn" type="button" class="btn-outline text-xs">Select all loaded</button>
+                            <button id="batch-apply-open-btn" type="button" class="btn text-xs">Apply tags…</button>
+                            <button id="batch-remove-open-btn" type="button" class="btn-outline text-xs">Remove tags…</button>
+                            <button id="batch-clear-btn" type="button" class="btn-sm-ghost text-xs">Clear</button>
+                        </div>
+                    </div>
                     <div id="viewer-empty-state"
                         class="rounded-lg border border-dashed border-border/70 bg-muted/20 px-6 py-12 text-center">
                         <p class="text-base font-semibold">No folder loaded yet</p>
@@ -602,21 +613,149 @@
                         <div id="lightbox-tags" class="mt-3 flex flex-wrap gap-2"></div>
                         <p id="lightbox-empty-tags" class="mt-3 text-sm text-muted-foreground hidden">No XMP tags found for this image yet.</p>
                         <div id="lightbox-tag-error" class="mt-3 text-xs text-destructive hidden"></div>
-                        <div id="lightbox-tag-editor" class="mt-4 flex items-center gap-2">
-                            <input id="lightbox-new-tag-input" class="input flex-1" type="text" placeholder="Add a tag…" maxlength="64" autocomplete="off">
-                            <button id="lightbox-add-tag-btn" class="btn-outline" type="button">Add</button>
+
+                        <!-- Smart Autocomplete Bar -->
+                        <div id="lightbox-autocomplete-wrap" class="mt-4 relative">
+                            <input id="lightbox-new-tag-input" class="input flex-1 w-full" type="text" placeholder="Add tag (type to search taxonomy + vocab + your tags)…" maxlength="64" autocomplete="off">
+                            <div id="lightbox-autocomplete-dropdown" class="hidden absolute left-0 right-0 top-full mt-1 z-50 rounded-lg border border-border bg-background shadow-xl overflow-hidden max-h-60 overflow-y-auto text-sm">
+                                <div id="lightbox-autocomplete-items"></div>
+                            </div>
+                        </div>
+                        <div class="mt-3 flex items-center gap-2">
+                            <button id="lightbox-add-tag-btn" class="btn-outline text-xs" type="button">Add Tag</button>
+                            <span class="text-[10px] text-muted-foreground">or press <kbd class="font-mono bg-muted px-0.5 rounded text-[10px]">Enter</kbd></span>
+                        </div>
+                    </div>
+
+                    <!-- Taxonomy Quick-Chips -->
+                    <div id="taxonomy-quick-chips" class="rounded-lg border border-border/60 bg-muted/10 p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Taxonomy Quick-Chips</p>
+                            <span class="text-[10px] text-muted-foreground bg-muted rounded-full px-2 py-0.5">Keyboard: P / G / M / C / O</span>
+                        </div>
+                        <div class="space-y-3">
+                            <!-- Process Axis -->
+                            <div class="taxonomy-axis-group">
+                                <div class="flex items-center gap-1.5 mb-1.5">
+                                    <span class="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950 px-1.5 py-0.5 rounded">P — Process</span>
+                                    <span class="text-[10px] text-muted-foreground">Press P to open overlay</span>
+                                </div>
+                                <div id="taxonomy-chips-process" class="flex flex-wrap gap-1.5"></div>
+                            </div>
+                            <!-- Geometry Axis -->
+                            <div class="taxonomy-axis-group">
+                                <div class="flex items-center gap-1.5 mb-1.5">
+                                    <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950 px-1.5 py-0.5 rounded">G — Geometry Kind</span>
+                                    <span class="text-[10px] text-muted-foreground">Press G to open overlay</span>
+                                </div>
+                                <div id="taxonomy-chips-geometry" class="flex flex-wrap gap-1.5"></div>
+                            </div>
+                            <!-- Material Axis -->
+                            <div class="taxonomy-axis-group">
+                                <div class="flex items-center gap-1.5 mb-1.5">
+                                    <span class="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1.5 py-0.5 rounded">M — Material</span>
+                                    <span class="text-[10px] text-muted-foreground">Press M to open overlay</span>
+                                </div>
+                                <div id="taxonomy-chips-material" class="flex flex-wrap gap-1.5"></div>
+                            </div>
+                            <!-- Machine Context Axis -->
+                            <div class="taxonomy-axis-group">
+                                <div class="flex items-center gap-1.5 mb-1.5">
+                                    <span class="text-[10px] font-bold uppercase tracking-wider text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-950 px-1.5 py-0.5 rounded">C — Machine</span>
+                                    <span class="text-[10px] text-muted-foreground">Press C to open overlay</span>
+                                </div>
+                                <div id="taxonomy-chips-machine" class="flex flex-wrap gap-1.5"></div>
+                            </div>
+                            <!-- Output Intent Axis -->
+                            <div class="taxonomy-axis-group">
+                                <div class="flex items-center gap-1.5 mb-1.5">
+                                    <span class="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950 px-1.5 py-0.5 rounded">O — Output Intent</span>
+                                    <span class="text-[10px] text-muted-foreground">Press O to open overlay</span>
+                                </div>
+                                <div id="taxonomy-chips-output" class="flex flex-wrap gap-1.5"></div>
+                            </div>
+                        </div>
+                        <div class="mt-3 pt-3 border-t border-border/40 flex items-center justify-between gap-2">
+                            <span class="text-[10px] text-muted-foreground">Select thumbnails below (checkbox / Shift+click), then batch-apply.</span>
+                            <button id="batch-apply-btn" type="button" class="btn-outline text-xs shrink-0">Batch Apply…</button>
                         </div>
                     </div>
                     <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
                         <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Viewer Tips</p>
                         <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-                            <li>Use Left and Right arrow keys to move between images.</li>
+                            <li>Use Left and Right (or N / B) arrow keys to move between images.</li>
+                            <li>Axis keys open Rapid Decision overlays: <b>P</b>rocess, <b>G</b>eometry, <b>M</b>aterial, <b>C</b>ontext, <b>O</b>utput — then press 1–9 to choose.</li>
+                            <li>Press <b>A</b> or <b>/</b> to focus the tag input; type for autocomplete across taxonomy, vocabulary, and your recent tags.</li>
+                            <li>Click a Quick-Chip to apply or toggle that taxonomy value for this image.</li>
                             <li>Press Escape or click outside the dialog to close the viewer.</li>
-                            <li>Click the pencil to rename a tag, and the ✕ to delete it.</li>
                         </ul>
                     </div>
                 </div>
             </section>
+        </article>
+    </dialog>
+
+    <!-- Rapid Key-Decision Overlay -->
+    <dialog id="rapid-overlay-dialog" class="dialog" aria-labelledby="rapid-overlay-title">
+        <article class="!max-w-lg">
+            <header>
+                <h2 id="rapid-overlay-title" class="flex items-center gap-2">Rapid Decision Mode <span id="rapid-axis-name" class="text-sm font-normal text-muted-foreground">— Process</span></h2>
+                <p id="rapid-overlay-desc" class="text-xs text-muted-foreground">Keyboard-driven taxonomy selection. Click or press number to choose.</p>
+            </header>
+            <button type="button" aria-label="Close overlay" data-dialog-close>
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+            <section class="overflow-y-auto max-h-[50vh]" tabindex="-1" autofocus>
+                <div id="rapid-overlay-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-4"></div>
+            </section>
+            <footer class="flex items-center justify-between pt-3 border-t border-border/30">
+                <span class="text-[10px] text-muted-foreground">Select a value to apply instantly</span>
+                <button type="button" data-dialog-close class="btn-sm">Cancel</button>
+            </footer>
+        </article>
+    </dialog>
+
+    <!-- Batch Apply Dialog -->
+    <dialog id="batch-apply-dialog" class="dialog" aria-labelledby="batch-apply-title">
+        <article class="!max-w-2xl">
+            <header>
+                <h2 id="batch-apply-title">Batch Tag Selection</h2>
+                <p id="batch-apply-desc" class="text-xs text-muted-foreground">Queue tags, then apply them to every selected image.</p>
+            </header>
+            <button type="button" aria-label="Close dialog" data-dialog-close>
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+            <section class="space-y-4 overflow-y-auto max-h-[55vh]" tabindex="-1" autofocus>
+                <div class="flex flex-wrap items-center gap-4">
+                    <span class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Mode</span>
+                    <label class="flex items-center gap-1.5 text-sm">
+                        <input type="radio" name="batch-mode" value="add" class="input" checked> Add / merge tags
+                    </label>
+                    <label class="flex items-center gap-1.5 text-sm">
+                        <input type="radio" name="batch-mode" value="remove" class="input"> Remove tags
+                    </label>
+                    <span id="batch-remove-note" class="text-xs text-muted-foreground hidden">Removes queued labels from each selected image's keywords.</span>
+                </div>
+
+                <div id="batch-pending-tags" class="flex flex-wrap gap-2 min-h-[2rem] rounded-lg border border-dashed border-border/60 bg-muted/20 p-3">
+                    <span class="text-xs text-muted-foreground">No tags queued yet — pick suggestions or taxonomy chips below.</span>
+                </div>
+
+                <div class="relative">
+                    <input id="batch-tag-input" class="input w-full" type="text" placeholder="Type to search taxonomy + vocabulary + your tags…" maxlength="64" autocomplete="off">
+                    <div id="batch-autocomplete-dropdown" class="hidden absolute left-0 right-0 top-full mt-1 z-50 rounded-lg border border-border bg-background shadow-xl overflow-hidden max-h-60 overflow-y-auto text-sm">
+                        <div id="batch-autocomplete-items"></div>
+                    </div>
+                </div>
+
+                <div id="batch-tax-chips" class="space-y-3 max-h-64 overflow-y-auto rounded-lg border border-border/60 bg-muted/10 p-3"></div>
+            </section>
+            <footer>
+                <div class="flex items-center justify-end gap-3 w-full">
+                    <button type="button" data-dialog-close class="btn-outline">Cancel</button>
+                    <button id="batch-apply-confirm-btn" type="button" class="btn">Apply to Selection</button>
+                </div>
+            </footer>
         </article>
     </dialog>
 
