@@ -64,6 +64,19 @@ class JobCancelledError(BaseException):
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 
+# Default folder the UI opens while developing; override with IMGTAGPLUS_DEFAULT_DIR.
+DEV_DEFAULT_DIR = "/Users/davec/Desktop/DXF/Samples"
+
+
+def _default_dir() -> str:
+    """Resolve the folder the UI should open by default.
+
+    ``IMGTAGPLUS_DEFAULT_DIR`` takes precedence so other machines can override
+    the development default without editing code.
+    """
+    env_default = os.environ.get("IMGTAGPLUS_DEFAULT_DIR", "").strip()
+    return env_default or DEV_DEFAULT_DIR
+
 app = FastAPI(title="ImgTagPlus Web UI")
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -180,15 +193,52 @@ class SSEQueueHandler(logging.Handler):
             self.handleError(record)
 
 
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    """Return True for the loopback host names the local UI uses."""
+    if not hostname:
+        return False
+    if hostname in ("localhost", "::1"):
+        return True
+    return hostname.startswith("127.")
+
+
+def _request_hostname(host_header: str | None) -> str | None:
+    """Extract the bare hostname from a Host header, tolerating IPv6 literals."""
+    if not host_header:
+        return None
+    return urlparse(f"//{host_header}").hostname
+
+
+def _origin_allowed(origin: str, host_header: str | None) -> bool:
+    """Allow same-origin and loopback requests; reject true cross-site origins.
+
+    Browsers attach an Origin header to every non-GET request, including
+    same-origin ones. When the UI is opened through a LAN IP or hostname
+    (e.g. http://192.168.1.50:5002) its own POST/PUT must be accepted even
+    though the host is not literally ``localhost``. Only origins that neither
+    match the request Host nor resolve to loopback are treated as cross-site
+    (CSRF) attempts.
+    """
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    origin_host = parsed.hostname
+    if _is_loopback_hostname(origin_host):
+        return True
+    request_host = _request_hostname(host_header)
+    return bool(origin_host) and origin_host == request_host
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     """Apply a restrictive CSP because the UI only serves local static assets."""
     if request.method in ("POST", "PUT", "DELETE"):
         origin = request.headers.get("origin")
-        if origin:
-            parsed = urlparse(origin)
-            if parsed.hostname not in ("localhost", "127.0.0.1"):
-                return HTMLResponse("Forbidden: cross-origin request", status_code=403)
+        if origin and not _origin_allowed(origin, request.headers.get("host")):
+            return HTMLResponse("Forbidden: cross-origin request", status_code=403)
 
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "DENY"
@@ -239,8 +289,7 @@ async def browse_directory(request: Request, path: str = ""):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     if not path:
-        env_default = os.environ.get("IMGTAGPLUS_DEFAULT_DIR", "").strip()
-        current_path = Path(env_default) if env_default else Path.home()
+        current_path = Path(_default_dir())
     else:
         current_path = Path(path)
 
@@ -607,7 +656,9 @@ async def get_models():
 @app.get("/api/system")
 async def get_system():
     """Returns full system profile."""
-    return get_profiler_summary()
+    payload = get_profiler_summary()
+    payload["default_dir"] = _default_dir()
+    return payload
 
 
 @app.get("/api/status")

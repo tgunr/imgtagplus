@@ -6,6 +6,22 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+async function readJson(res) {
+    // Safari collapses .json() on a non-JSON body into its generic
+    // "The string did not match the expected pattern." message, which hides the
+    // real error (e.g. a plain-text 403/500 page). Read text first so callers
+    // always get a readable detail string instead.
+    const text = await res.text();
+    if (!text) {
+        return {};
+    }
+    try {
+        return JSON.parse(text);
+    } catch (_) {
+        return { detail: text.trim() };
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     
     // UI Elements
@@ -473,7 +489,7 @@ document.addEventListener('DOMContentLoaded', () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path, tags })
         });
-        const data = await res.json();
+        const data = await readJson(res);
         if (!res.ok) {
             throw new Error(data.detail || 'Failed to update tags.');
         }
@@ -665,9 +681,20 @@ document.addEventListener('DOMContentLoaded', () => {
     async function init() {
         try {
             const sysRes = await fetch('/api/system');
-            const data = await sysRes.json();
+            const data = await readJson(sysRes);
             
             models = data.models;
+
+            // Prefill the working folders with the server's default so the
+            // app opens the development sample set without manual browsing.
+            if (data.default_dir) {
+                if (!inputPath.value.trim()) {
+                    inputPath.value = data.default_dir;
+                }
+                if (!viewerPathInput.value.trim()) {
+                    viewerPathInput.value = data.default_dir;
+                }
+            }
             
             // Populate Hardware
             ramSpec.textContent = `${data.hardware.total_ram_gb} GB (${data.hardware.available_ram_gb} GB free)`;
@@ -729,7 +756,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // If the page is refreshed mid-run, restore the locked UI and reconnect to the stream.
             const statusRes = await fetch('/api/status');
-            const statusData = await statusRes.json();
+            const statusData = await readJson(statusRes);
             syncRuntimeFromStatus(statusData);
             if (statusData.is_processing) {
                 setProcessingState(true);
@@ -767,7 +794,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch('/api/stop', { method: 'POST' });
             if (!res.ok) {
-                const data = await res.json();
+                const data = await readJson(res);
                 throw new Error(data.detail || 'Failed to stop job');
             }
         } catch (e) {
@@ -1086,7 +1113,7 @@ document.addEventListener('DOMContentLoaded', () => {
         dirList.innerHTML = '<div class="p-4 text-center text-sm text-muted-foreground">Loading...</div>';
         try {
             const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
-            const data = await res.json();
+            const data = await readJson(res);
             
             if (!res.ok) {
                 dirList.innerHTML = `<div class="p-4 text-center text-sm text-destructive">${escapeHtml(data.detail || 'Unknown error')}</div>`;
@@ -1159,7 +1186,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 limit: String(viewerPageSize)
             });
             const res = await fetch(`/api/images?${params.toString()}`);
-            const data = await res.json();
+            const data = await readJson(res);
 
             if (!res.ok) {
                 throw new Error(data.detail || 'Failed to load images.');
@@ -1233,7 +1260,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify(payload)
             });
             
-            const data = await res.json();
+            const data = await readJson(res);
             if (!res.ok) {
                 throw new Error(data.detail || 'Unknown error');
             }

@@ -156,6 +156,11 @@ class Tagger:
         self._model_dir = model_dir
         self._model_dir.mkdir(parents=True, exist_ok=True)
 
+        # Align every HF cache env var with this root before HF libs are imported.
+        from imgtagplus.hfcache import point_hf_caches_at
+
+        point_hf_caches_at(self._model_dir)
+
         # Download model files from Hugging Face (cached after first run).
         visual_path = self._ensure_file(_VISUAL_MODEL_FILE)
         text_path = self._ensure_file(_TEXT_MODEL_FILE)

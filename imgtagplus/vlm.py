@@ -101,8 +101,11 @@ class FlorenceTagger:
 
         self._model_dir = model_dir
 
-        # Keep processor/model downloads in the same writable cache root.
-        os.environ["HF_HOME"] = str(self._model_dir)
+        # Keep processor/model downloads (and the trust_remote_code module cache)
+        # in the same writable cache root, before any HF library is imported.
+        from imgtagplus.hfcache import point_hf_caches_at
+
+        point_hf_caches_at(self._model_dir)
 
         import torch
 

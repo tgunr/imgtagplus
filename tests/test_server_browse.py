@@ -31,13 +31,25 @@ async def test_browse_directory_lists_child_directories(
 
 
 @pytest.mark.asyncio
-async def test_browse_directory_defaults_to_home(
+async def test_browse_directory_defaults_to_configured_dir(
     monkeypatch, tmp_path: Path
 ) -> None:
+    default_dir = tmp_path / "samples"
+    default_dir.mkdir()
     monkeypatch.setattr(server, "_check_rate_limit", lambda *a: True)
-    monkeypatch.setattr(server.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_default_dir", lambda: str(default_dir))
 
     result = await server.browse_directory(request=None, path=None)
 
-    assert result["current_path"] == str(tmp_path)
+    assert result["current_path"] == str(default_dir)
     assert result["sandbox"] is False
+
+
+def test_default_dir_prefers_env_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("IMGTAGPLUS_DEFAULT_DIR", str(tmp_path))
+    assert server._default_dir() == str(tmp_path)
+
+
+def test_default_dir_falls_back_to_dev_default(monkeypatch) -> None:
+    monkeypatch.delenv("IMGTAGPLUS_DEFAULT_DIR", raising=False)
+    assert server._default_dir() == server.DEV_DEFAULT_DIR

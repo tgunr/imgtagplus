@@ -20,6 +20,18 @@ from imgtagplus import __version__
 _PID_SUFFIX = str(os.getuid()) if hasattr(os, "getuid") else "default"
 PID_FILE = Path(tempfile.gettempdir()) / f"imgtagplus_server_{_PID_SUFFIX}.pid"
 
+
+def _resolved_host() -> str:
+    """Bind host the server will use (honors IMGTAGPLUS_HOST / IMGTAGPLUS_LOOPBACK)."""
+    if os.environ.get("IMGTAGPLUS_LOOPBACK", "").strip() == "1":
+        return "127.0.0.1"
+    return os.environ.get("IMGTAGPLUS_HOST", "").strip() or "0.0.0.0"
+
+
+def _resolved_port() -> str:
+    """Bind port the server will use (honors IMGTAGPLUS_PORT, defaults to 5002)."""
+    return os.environ.get("IMGTAGPLUS_PORT", "").strip() or "5002"
+
 def _get_server_pid() -> int | None:
     """Return the last recorded daemon PID, or None if the pid file is missing/invalid."""
     if PID_FILE.exists():
@@ -93,10 +105,8 @@ def start_server_daemon() -> None:
     PID_FILE.write_text(str(proc.pid))
     # Resolve the same host/port as server.py so the health poll matches the
     # actual bind (IMGTAGPLUS_HOST / IMGTAGPLUS_PORT, defaults 0.0.0.0:5002).
-    env_host = os.environ.get("IMGTAGPLUS_HOST", "").strip() or (
-        "127.0.0.1" if os.environ.get("IMGTAGPLUS_LOOPBACK", "").strip() == "1" else "0.0.0.0"
-    )
-    env_port = os.environ.get("IMGTAGPLUS_PORT", "").strip() or "5002"
+    env_host = _resolved_host()
+    env_port = _resolved_port()
     if _wait_for_server_ready(f"http://127.0.0.1:{env_port}/health"):
         print(f"Server started on http://{env_host}:{env_port} (PID {proc.pid})")
         return
@@ -149,7 +159,9 @@ def print_menu():
     status = "\033[92mRunning\033[0m" if is_running else "\033[91mStopped\033[0m"
     print(f"  Web UI Status: {status}")
     if is_running:
-        print("  URL: http://127.0.0.1:5000")
+        host = _resolved_host()
+        display_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+        print(f"  URL: http://{display_host}:{_resolved_port()}")
         
     print("-" * 40)
     print("  [1] Start Web UI Server")
