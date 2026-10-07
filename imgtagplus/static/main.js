@@ -104,6 +104,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const lightboxPrevBtn = document.getElementById('lightbox-prev-btn');
     const lightboxNextBtn = document.getElementById('lightbox-next-btn');
 
+    // Lightbox keyword feedback
+    const lightboxKeywordForm = document.getElementById('lightbox-keyword-form');
+    const lightboxKeywordInput = document.getElementById('lightbox-keyword-input');
+    const lightboxKeywordAddBtn = document.getElementById('lightbox-keyword-add-btn');
+    const lightboxUserKeywords = document.getElementById('lightbox-user-keywords');
+    const lightboxKeywordNote = document.getElementById('lightbox-keyword-feedback');
+
     // Manual Accelerator Elements
     const manualAccelToggle = document.getElementById('manual-accelerator');
     const manualAccelStatus = document.getElementById('manual-accel-status');
@@ -445,6 +452,10 @@ document.addEventListener('DOMContentLoaded', () => {
         lightboxEmptyTags.classList.toggle('hidden', item.tags.length > 0);
         lightboxPrevBtn.disabled = viewerState.activeIndex === 0;
         lightboxNextBtn.disabled = viewerState.activeIndex >= viewerState.images.length - 1;
+
+        // Human keywords are sidecar-only, so fetch (or reuse cached) state
+        // whenever the lightbox shows a different image.
+        loadLightboxKeywords(item);
     }
 
     function openLightboxAt(index) {
@@ -837,6 +848,153 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     lightboxPrevBtn.addEventListener('click', () => moveLightbox(-1));
     lightboxNextBtn.addEventListener('click', () => moveLightbox(1));
+
+    // ----- Lightbox keyword feedback -----
+
+    function activeLightboxItem() {
+        return viewerState.images[viewerState.activeIndex] || null;
+    }
+
+    function setKeywordNote(message, isError = false) {
+        if (!lightboxKeywordNote) return;
+        lightboxKeywordNote.textContent = message;
+        lightboxKeywordNote.classList.toggle('text-destructive', isError);
+        lightboxKeywordNote.classList.toggle('text-green-600', !isError);
+        lightboxKeywordNote.classList.toggle('dark:text-green-400', !isError);
+    }
+
+    function resetKeywordNote() {
+        setKeywordNote('Keyword feedback: keywords you add are offered to similar images sharing tags.');
+    }
+
+    function renderUserKeywords(item) {
+        const container = lightboxUserKeywords;
+        container.innerHTML = '';
+        const keywords = Array.isArray(item.user_keywords) ? item.user_keywords : [];
+        if (keywords.length === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'text-xs text-muted-foreground';
+            empty.textContent = 'No personal keywords on this image yet.';
+            container.appendChild(empty);
+            return;
+        }
+        for (const keyword of keywords) {
+            const chip = document.createElement('span');
+            chip.className = 'inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs font-medium';
+            const label = document.createElement('span');
+            label.textContent = keyword;
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'font-semibold hover:text-destructive';
+            removeBtn.textContent = '\u00d7';
+            removeBtn.setAttribute('aria-label', `Remove keyword ${keyword}`);
+            removeBtn.addEventListener('click', () => removeUserKeyword(item, keyword));
+            chip.append(label, removeBtn);
+            container.appendChild(chip);
+        }
+    }
+
+    async function loadLightboxKeywords(item) {
+        if (!item) return;
+        if (Array.isArray(item.user_keywords)) {
+            renderUserKeywords(item);
+            resetKeywordNote();
+            return;
+        }
+        // Human keywords live in the taxonomy sidecar, not the XMP bag, so a
+        // late fetch fills them in and guards against the user navigating
+        // away while the request is in flight.
+        item.user_keywords = [];
+        try {
+            const res = await fetch(`/api/tags?path=${encodeURIComponent(item.path)}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Failed to load keywords');
+            if (activeLightboxItem() !== item) return;
+            item.user_keywords = Array.isArray(data.tags?.user_keywords) ? data.tags.user_keywords : [];
+        } catch (error) {
+            if (activeLightboxItem() !== item) return;
+            console.error('Failed to load user keywords:', error);
+        }
+        renderUserKeywords(item);
+        resetKeywordNote();
+    }
+
+    async function addUserKeyword(item) {
+        if (!item) return;
+        const keyword = lightboxKeywordInput.value.trim();
+        if (!keyword) {
+            setKeywordNote('Type a keyword first.', true);
+            return;
+        }
+        lightboxKeywordAddBtn.disabled = true;
+        try {
+            const res = await fetch('/api/tags/keyword', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: item.path, keyword })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Failed to add keyword');
+
+            item.user_keywords = data.user_keywords || [];
+            const known = new Set(item.tags);
+            for (const kw of (data.added || [])) {
+                if (!known.has(kw)) {
+                    known.add(kw);
+                    item.tags.push(kw);
+                }
+            }
+            item.tag_count = item.tags.length;
+            renderLightbox();
+            renderViewerGallery();
+
+            const appliedCount = (data.applied_to || []).length;
+            if (appliedCount > 0) {
+                const names = data.applied_to.map((entry) => entry.name).join(', ');
+                setKeywordNote(`Offered "${data.added.join(', ')}" to ${appliedCount} similar image${appliedCount === 1 ? '' : 's'}: ${names}.`);
+                addLog({level: 'INFO', message: `Feedback: offered "${data.added.join(', ')}" to ${appliedCount} image(s): ${names}`});
+            } else {
+                setKeywordNote(`Saved "${data.added.join(', ')}". Similar images sharing at least 2 tags will pick it up on the next scan.`);
+            }
+            lightboxKeywordInput.value = '';
+        } catch (error) {
+            setKeywordNote(error.message || 'Failed to add keyword.', true);
+        } finally {
+            lightboxKeywordAddBtn.disabled = false;
+        }
+    }
+
+    async function removeUserKeyword(item, keyword) {
+        if (!item) return;
+        lightboxKeywordAddBtn.disabled = true;
+        try {
+            const res = await fetch('/api/tags/keyword-remove', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: item.path, keyword })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Failed to remove keyword');
+
+            item.user_keywords = data.user_keywords || [];
+            item.tags = item.tags.filter((tag) => tag.toLowerCase().trim() !== keyword.toLowerCase().trim());
+            item.tag_count = item.tags.length;
+            renderLightbox();
+            renderViewerGallery();
+            resetKeywordNote();
+            addLog({level: 'INFO', message: `Feedback: removed keyword "${keyword}" from ${item.name}. Copies already inherited by other images are kept until they are edited there.`});
+        } catch (error) {
+            setKeywordNote(error.message || 'Failed to remove keyword.', true);
+        } finally {
+            lightboxKeywordAddBtn.disabled = false;
+        }
+    }
+
+    lightboxKeywordForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        addUserKeyword(activeLightboxItem());
+    });
+
     document.addEventListener('keydown', (event) => {
         if (!lightboxDialog.open) {
             return;

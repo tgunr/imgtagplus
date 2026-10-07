@@ -14,7 +14,8 @@ migration policy.
 
 Also owns the taxonomy JSON sidecar (``.imgtagplus.json``) that carries
 the analyzer's ``derived_tags`` alongside human edits — user tags,
-deletions, overrides, and the ``feedback_for_future_scans`` artifact.
+deletions, overrides, free-form ``user_keywords``, and the
+``feedback_for_future_scans`` artifact.
 The JSON sidecar is deliberately separate from the XMP file so DAM
 software never sees internal bookkeeping.
 """
@@ -30,6 +31,8 @@ import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from imgtagplus.tags import normalize_keyword
 
 log = logging.getLogger(__name__)
 
@@ -198,6 +201,40 @@ def read_xmp_tags(image_path: Path, output_dir: Path | None = None) -> list[str]
     return sorted(_read_existing_tags(xmp_path))
 
 
+def remove_xmp_tags(
+    image_path: Path,
+    keywords: Sequence[str],
+    output_dir: Path | None = None,
+) -> Path | None:
+    """Remove keywords from the image's XMP sidecar ``dc:subject`` bag.
+
+    Matching is case- and whitespace-insensitive (the same normalization the
+    keyword-feedback layer applies), so removing ``Vase`` clears tags that
+    were stored as ``vase`` too.  The sidecar is rewritten with the surviving
+    tags.  Returns the rewritten sidecar path, or ``None`` when the image has
+    no sidecar, none of *keywords* matched, or matching removed nothing —
+    callers can treat ``None`` as "nothing to update" rather than an error.
+    """
+    xmp_path = resolve_xmp_path(image_path, output_dir=output_dir)
+    if xmp_path is None:
+        return None
+
+    existing = _read_existing_tags(xmp_path)
+    if not existing:
+        return None
+    removed = {k for k in (normalize_keyword(kw) for kw in keywords) if k}
+    if not removed:
+        return None
+    remaining = [tag for tag in sorted(existing) if normalize_keyword(tag) not in removed]
+    if len(remaining) == len(existing):
+        return None
+
+    xml_str = _build_xmp(remaining, image_path.name)
+    xmp_path.write_text(xml_str, encoding="utf-8")
+    log.debug("Removed %d keyword(s) from %s", len(existing) - len(remaining), xmp_path)
+    return xmp_path
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -302,6 +339,7 @@ _OWNED_SIDECAR_KEYS = (
     "user_tags",
     "user_deletions",
     "user_overrides",
+    "user_keywords",
     "feedback_for_future_scans",
 )
 
@@ -355,6 +393,7 @@ def write_tag_sidecar(
     user_tags: Mapping[str, Any] | None = None,
     user_deletions: Sequence[str] | None = None,
     user_overrides: Mapping[str, Any] | None = None,
+    user_keywords: Sequence[str] | None = None,
     feedback: Mapping[str, Any] | None = None,
     output_dir: Path | None = None,
     file_hash: str | None = None,
@@ -382,6 +421,7 @@ def write_tag_sidecar(
         "user_tags": dict(user_tags) if user_tags is not None else existing.get("user_tags", {}),
         "user_deletions": list(user_deletions) if user_deletions is not None else existing.get("user_deletions", []),
         "user_overrides": dict(user_overrides) if user_overrides is not None else existing.get("user_overrides", {}),
+        "user_keywords": list(user_keywords) if user_keywords is not None else existing.get("user_keywords", []),
         "feedback_for_future_scans": dict(feedback) if feedback is not None else existing.get("feedback_for_future_scans", {}),
     }
 

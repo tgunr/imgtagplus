@@ -596,13 +596,23 @@
                         </div>
                     </div>
                 </div>
-                <div class="space-y-4">
-                    <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
-                        <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Tags</p>
-                        <div id="lightbox-tags" class="mt-3 flex flex-wrap gap-2"></div>
-                        <p id="lightbox-empty-tags" class="mt-3 text-sm text-muted-foreground hidden">No XMP tags found for this image yet.</p>
-                    </div>
-                    <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
+                    <div class="space-y-4">
+                        <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
+                            <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Tags</p>
+                            <div id="lightbox-tags" class="mt-3 flex flex-wrap gap-2"></div>
+                            <p id="lightbox-empty-tags" class="mt-3 text-sm text-muted-foreground hidden">No XMP tags found for this image yet.</p>
+                        </div>
+                        <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
+                            <p id="lightbox-keyword-feedback" class="text-xs text-muted-foreground">Keyword feedback: keywords you add are offered to similar images sharing tags.</p>
+                            <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">My Keywords</p>
+                            <div id="lightbox-user-keywords" class="mt-3 flex flex-wrap gap-2"></div>
+                            <form id="lightbox-keyword-form" class="mt-3 flex items-center gap-2">
+                                <input id="lightbox-keyword-input" type="text" class="input flex-1" placeholder="Add keyword — e.g. vase" autocomplete="off">
+                                <button id="lightbox-keyword-add-btn" type="submit" class="btn shrink-0">Add</button>
+                            </form>
+                            <p class="mt-2 text-xs text-muted-foreground">Your keywords are stored in this image's sidecar and offered here and to future scans: similar images in this folder that share at least 2 tags inherit them.</p>
+                        </div>
+                        <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
                         <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Viewer Tips</p>
                         <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
                             <li>Use Left and Right arrow keys to move between images.</li>

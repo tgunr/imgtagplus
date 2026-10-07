@@ -30,12 +30,15 @@ from imgtagplus.metadata import (
     compute_file_hash,
     read_tag_sidecar,
     read_xmp_tags,
+    remove_xmp_tags,
     sidecar_path_for_image,
     write_tag_sidecar,
+    write_xmp,
 )
 from imgtagplus.profiler import get_model_recommendations, get_profiler_summary
 from imgtagplus.scanner import IMAGE_EXTENSIONS, scan
 from imgtagplus.tags import (
+    KEYWORD_FEEDBACK_MIN_INTERSECTION,
     TaxonomyError,
     _deletion_axis,
     build_feedback_artifact,
@@ -45,6 +48,8 @@ from imgtagplus.tags import (
     merge_sidecar,
     merge_tags,
     normalize_key,
+    normalize_keyword,
+    sanitize_user_keywords,
     taxonomy_summary,
     validate_axis_key,
 )
@@ -64,6 +69,8 @@ app = FastAPI(title="ImgTagPlus Web UI")
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 QUEUE_MAXSIZE = 1000
+
+log = logging.getLogger(__name__)
 log_queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
 progress_queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
 _job_lock = threading.Lock()
@@ -365,6 +372,12 @@ def _save_tag_state(image_path: Path, sidecar: dict) -> dict:
 
     with _get_image_lock(image_path):
         file_hash = sidecar.get("file_hash") or compute_file_hash(image_path)
+        user_keywords = sanitize_user_keywords(sidecar.get("user_keywords"))
+        # Keyword feedback needs to know what the image looked like when the
+        # human was editing it: the condition is the full effective keyword
+        # surface (machine tags in the XMP bag + typed user keywords), so
+        # similar-tagged images can inherit the keywords later.
+        condition_keywords = [*read_xmp_tags(image_path), *user_keywords]
         # Regenerate the feedback artifact from the human edits being saved,
         # so it always reflects the current sidecar rather than drifting.
         feedback = build_feedback_artifact(
@@ -372,6 +385,8 @@ def _save_tag_state(image_path: Path, sidecar: dict) -> dict:
             user_tags=sidecar.get("user_tags"),
             user_deletions=sidecar.get("user_deletions"),
             user_overrides=sidecar.get("user_overrides"),
+            user_keywords=user_keywords,
+            condition_keywords=condition_keywords,
         )
         write_tag_sidecar(
             image_path,
@@ -379,6 +394,7 @@ def _save_tag_state(image_path: Path, sidecar: dict) -> dict:
             user_tags=sidecar.get("user_tags"),
             user_deletions=sidecar.get("user_deletions"),
             user_overrides=sidecar.get("user_overrides"),
+            user_keywords=user_keywords,
             feedback=feedback,
             file_hash=file_hash,
         )
@@ -393,6 +409,7 @@ def _tag_view(image_path: Path) -> dict:
     sidecar = _load_tag_state(image_path)
     merged = merge_sidecar(sidecar)
     merged["file_hash"] = sidecar.get("file_hash")
+    merged["user_keywords"] = sanitize_user_keywords(sidecar.get("user_keywords"))
     merged["sidecar_path"] = str(sidecar_path_for_image(image_path))
     return merged
 
@@ -526,6 +543,172 @@ async def reset_deletion(request: Request):
             )
 
     return await _mutate_tags(request, body, mutate)
+
+
+# ---------------------------------------------------------------------------
+# Free-form keyword feedback
+# ---------------------------------------------------------------------------
+
+def _propagate_keyword_feedback(donor_path: Path, artifact: dict) -> list[dict]:
+    """Apply a donor's keyword-feedback artifact to its sibling images now.
+
+    Mirrors what a scan would do with :func:`keyword_feedback_additions` but
+    is limited to the donor's own directory, so an interactive save stays
+    bounded.  A sibling receives the keywords when its known tag surface
+    (XMP bag + its own sidecar user keywords) meets the artifact's
+    ``keyword_condition``.  The donor itself is skipped — it already carries
+    the keywords.  Returns one record per successfully updated sibling.
+    """
+    keywords = artifact.get("user_added_keywords") or []
+    condition = artifact.get("keyword_condition") or {}
+    must = [
+        m for m in (normalize_keyword(t) for t in (condition.get("must_intersect") or ()))
+        if m
+    ]
+    try:
+        min_required = max(
+            1,
+            int(condition.get("min_intersection", KEYWORD_FEEDBACK_MIN_INTERSECTION)),
+        )
+    except (TypeError, ValueError):
+        min_required = KEYWORD_FEEDBACK_MIN_INTERSECTION
+
+    if not keywords or not must:
+        return []
+
+    try:
+        candidates = scan(donor_path.parent)
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning("Keyword feedback sweep could not list %s: %s", donor_path.parent, exc)
+        return []
+
+    donor_resolved = donor_path.resolve()
+    applied: list[dict] = []
+    for candidate in candidates:
+        if candidate.resolve() == donor_resolved:
+            continue
+        known = set(read_xmp_tags(candidate))
+        sidecar = read_tag_sidecar(candidate)
+        known |= {normalize_keyword(k) for k in (sidecar.get("user_keywords") or ()) if k}
+        overlap = known & set(must)
+        if len(overlap) < min_required:
+            continue
+        try:
+            write_xmp(candidate, list(keywords))
+        except Exception as exc:
+            log.warning("Keyword feedback could not update %s: %s", candidate.name, exc)
+            continue
+        log.info(
+            "Feedback: offered %s to %s (shares %d tag(s): %s)",
+            ", ".join(keywords),
+            candidate.name,
+            len(overlap),
+            ", ".join(sorted(overlap)[:5]),
+        )
+        applied.append({
+            "path": str(candidate),
+            "name": candidate.name,
+            "added": list(keywords),
+        })
+    return applied
+
+
+@app.put("/api/tags/keyword")
+async def put_keyword(request: Request):
+    """Add free-form keywords to an image and offer them to similar siblings.
+
+    Body: ``{path, keyword}`` or ``{path, keywords: [...]}``.  Keywords are
+    normalized (trimmed, whitespace-collapsed, lowercased) and stored in the
+    sidecar's ``user_keywords``; the feedback artifact records them with a
+    ``keyword_condition`` built from the image's effective tags, and the new
+    keywords are merged into the image's own XMP immediately.
+
+    Propagation: sibling images in the same directory that share at least
+    ``KEYWORD_FEEDBACK_MIN_INTERSECTION`` of the condition tags receive the
+    keywords in their XMP right away.  Any later scan re-applies this from
+    the persisted artifact, recursively.
+    """
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    body = await request.json()
+    image_path = _require_image_file(body.get("path"))
+    raw = body.get("keywords")
+    if not isinstance(raw, list):
+        single = body.get("keyword")
+        raw = [single] if single is not None else []
+    if not raw:
+        raise HTTPException(status_code=400, detail="keyword(s) required")
+    keywords = sanitize_user_keywords(raw)
+    if not keywords:
+        raise HTTPException(status_code=400, detail="no usable keywords supplied")
+
+    from imgtagplus.metadata import _get_image_lock
+
+    with _get_image_lock(image_path):
+        sidecar = _load_tag_state(image_path)
+        existing = sanitize_user_keywords(sidecar.get("user_keywords"))
+        added_now = [k for k in keywords if k not in existing]
+        sidecar["user_keywords"] = sorted(set(existing) | set(keywords))
+        merged = _save_tag_state(image_path, sidecar)
+        persisted = read_tag_sidecar(image_path)
+
+        if added_now:
+            # The viewer reads tags from XMP; put the new keywords there now
+            # so they are visible without waiting for a scan.
+            write_xmp(image_path, added_now)
+        artifact = persisted.get("feedback_for_future_scans") or {}
+        applied = _propagate_keyword_feedback(image_path, artifact) if added_now else []
+
+    return {
+        "ok": True,
+        "user_keywords": list(persisted.get("user_keywords") or []),
+        "added": added_now,
+        "applied_to": applied,
+        "tags": merged,
+    }
+
+
+@app.put("/api/tags/keyword-remove")
+async def remove_keyword(request: Request):
+    """Remove a free-form keyword from an image. Body: {path, keyword}.
+
+    Drops it from ``user_keywords`` and the image's own XMP bag.  Keywords
+    already inherited by other images stay there — removing stops *future*
+    propagation, it does not retract history.
+    """
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    body = await request.json()
+    image_path = _require_image_file(body.get("path"))
+    keyword = normalize_keyword(body.get("keyword"))
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword required")
+
+    from imgtagplus.metadata import _get_image_lock
+
+    with _get_image_lock(image_path):
+        sidecar = _load_tag_state(image_path)
+        existing = sanitize_user_keywords(sidecar.get("user_keywords"))
+        if keyword not in existing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"keyword {keyword!r} is not stored for this image",
+            )
+        sidecar["user_keywords"] = [k for k in existing if k != keyword]
+        merged = _save_tag_state(image_path, sidecar)
+        persisted = read_tag_sidecar(image_path)
+        xmp_removed = remove_xmp_tags(image_path, [keyword]) is not None
+
+    return {
+        "ok": True,
+        "user_keywords": list(persisted.get("user_keywords") or []),
+        "xmp_removed": xmp_removed,
+        "tags": merged,
+    }
 
 
 @app.get("/api/models")
