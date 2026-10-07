@@ -49,6 +49,15 @@ All server-provided strings (error messages, filenames, log content) are escaped
 | `GET` | `/api/system` | Returns system profile + model metadata |
 | `GET` | `/api/status` | Returns whether a job is running |
 | `GET` | `/api/browse` | Server-side directory browser for the file picker |
+| `GET` | `/api/images` | Paged image list with XMP tags for the viewer |
+| `GET` | `/api/image` | Streams one image (rasterized on the fly for SVG/DXF) |
+| `GET` | `/api/taxonomy` | Full taxonomy (axes, values, precedence) |
+| `GET` | `/api/tags` | Effective taxonomy tags for one image |
+| `PUT` | `/api/tags/user` | Assign a user tag on an axis |
+| `PUT` | `/api/tags/override` | Override the current value of an axis |
+| `PUT` | `/api/tags/delete` | Delete the tag on an axis |
+| `POST` | `/api/tags/reset-deletion` | Undo a deletion so the analyzer can re-propose |
+| `PUT` | `/api/tags/keywords` | Replace the image's full XMP keyword list (add/rename/delete) |
 | `POST` | `/api/tag` | Starts a tagging job |
 | `GET` | `/api/stream` | SSE stream for logs and progress |
 | `GET` | `/api/logs/download` | Downloads the most recent log file |
@@ -182,6 +191,49 @@ Notes:
 
 - error detail is in the `detail` field (standard FastAPI HTTPException format)
 - the browser cannot inspect local folders directly, so the frontend proxies navigation through this endpoint
+
+## `PUT /api/tags/keywords`
+
+Replaces the complete XMP keyword set (``dc:subject`` bag) for one image. One
+endpoint serves the viewer's add/rename/delete flows because the frontend
+submits the full new list; the server trims and de-duplicates entries, sorts
+them, and writes the canonical `<name>.<ext>.xmp` sidecar atomically under
+the per-image lock.
+
+Request body:
+
+```json
+{
+  "path": "/absolute/path/to/image.jpg",
+  "tags": ["beach", "sunset"]
+}
+```
+
+Successful response:
+
+```json
+{
+  "ok": true,
+  "tags": ["beach", "sunset"],
+  "tag_count": 2,
+  "xmp_path": "/absolute/path/to/image.jpg.xmp"
+}
+```
+
+Error responses:
+
+- `400` — `tags` is not a list of strings (or the path is empty/unsupported)
+- `404` — image does not exist
+- `429` — rate limit exceeded
+
+Notes:
+
+- replacement semantics: the submitted list is the whole truth — to add a
+  keyword, submit the existing list plus the new one
+- empty tag strings are dropped; an empty list deletes every keyword
+- taxonomy (axis) tags in the `.imgtagplus.json` sidecar are not touched by
+  this endpoint; use the `/api/tags/{user,override,delete}` endpoints for
+  axis-level classification edits
 
 ## `POST /api/tag`
 

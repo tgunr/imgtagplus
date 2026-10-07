@@ -601,13 +601,18 @@
                         <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Tags</p>
                         <div id="lightbox-tags" class="mt-3 flex flex-wrap gap-2"></div>
                         <p id="lightbox-empty-tags" class="mt-3 text-sm text-muted-foreground hidden">No XMP tags found for this image yet.</p>
+                        <div id="lightbox-tag-error" class="mt-3 text-xs text-destructive hidden"></div>
+                        <div id="lightbox-tag-editor" class="mt-4 flex items-center gap-2">
+                            <input id="lightbox-new-tag-input" class="input flex-1" type="text" placeholder="Add a tag…" maxlength="64" autocomplete="off">
+                            <button id="lightbox-add-tag-btn" class="btn-outline" type="button">Add</button>
+                        </div>
                     </div>
                     <div class="rounded-lg border border-border/60 bg-muted/20 p-4">
                         <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Viewer Tips</p>
                         <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
                             <li>Use Left and Right arrow keys to move between images.</li>
                             <li>Press Escape or click outside the dialog to close the viewer.</li>
-                            <li>Tags are read from `.xmp` sidecar files next to each image.</li>
+                            <li>Click the pencil to rename a tag, and the ✕ to delete it.</li>
                         </ul>
                     </div>
                 </div>

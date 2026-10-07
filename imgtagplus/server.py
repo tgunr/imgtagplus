@@ -31,8 +31,11 @@ from imgtagplus.metadata import (
     compute_file_hash,
     read_tag_sidecar,
     read_xmp_tags,
+    resolve_xmp_path,
     sidecar_path_for_image,
     write_tag_sidecar,
+    write_xmp,
+    _get_image_lock,
 )
 from imgtagplus.profiler import get_model_recommendations, get_profiler_summary
 from imgtagplus.scanner import IMAGE_EXTENSIONS, scan
@@ -523,6 +526,55 @@ async def delete_tag(request: Request):
         sidecar["user_deletions"] = deletions
 
     return await _mutate_tags(request, body, mutate)
+
+
+@app.put("/api/tags/keywords")
+async def put_keywords(request: Request):
+    """Add, modify, or delete the XMP keyword set for one image.
+
+    Body: ``{path, tags: [str, ...]}``. The submitted list becomes the
+    complete keyword set (replacement semantics) so one endpoint serves the
+    frontend's add (append to existing), modify (rename one entry), and
+    delete (drop entries) flows. Tags are trimmed, empty entries are
+    dropped, and the result is de-duplicated and sorted.
+
+    Returns the resulting canonical keyword list.
+    """
+    body = await request.json()
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    raw_tags = body.get("tags")
+    if not isinstance(raw_tags, list) or any(
+        not isinstance(tag, str) for tag in raw_tags
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="tags must be a list of strings",
+        )
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for tag in raw_tags:
+        text = tag.strip()
+        if text and text not in seen:
+            seen.add(text)
+            cleaned.append(text)
+    cleaned.sort()
+
+    image_path = _require_image_file(body.get("path"))
+    with _get_image_lock(image_path):
+        write_xmp(image_path, cleaned, overwrite=True)
+        persisted = read_xmp_tags(image_path)
+
+    xmp_path = resolve_xmp_path(image_path)
+    return {
+        "ok": True,
+        "tags": persisted,
+        "tag_count": len(persisted),
+        "xmp_path": str(xmp_path) if xmp_path else "",
+    }
 
 
 @app.post("/api/tags/reset-deletion")

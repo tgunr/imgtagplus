@@ -45,6 +45,7 @@ ImgTagPlus is a local-first image-tagging tool that scans images on disk, runs a
 - The viewer reads tags from `.xmp` sidecar files located next to each image.
 - Images without sidecar tags still appear in the viewer and show an explicit empty-tag state.
 - The lightbox supports previous/next navigation and keyboard shortcuts with `ArrowLeft`, `ArrowRight`, and `Escape`.
+- The lightbox lets the user add, rename, and delete the image's XMP tags; each change is written back to the image's `.xmp` sidecar immediately via `PUT /api/tags/keywords`.
 - The lightbox keeps a consistent preview frame size while navigating between images.
 
 ## Zero-images behavior

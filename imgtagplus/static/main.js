@@ -103,6 +103,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const lightboxEmptyTags = document.getElementById('lightbox-empty-tags');
     const lightboxPrevBtn = document.getElementById('lightbox-prev-btn');
     const lightboxNextBtn = document.getElementById('lightbox-next-btn');
+    const lightboxTagError = document.getElementById('lightbox-tag-error');
+    const lightboxNewTagInput = document.getElementById('lightbox-new-tag-input');
+    const lightboxAddTagBtn = document.getElementById('lightbox-add-tag-btn');
 
     // Manual Accelerator Elements
     const manualAccelToggle = document.getElementById('manual-accelerator');
@@ -148,6 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
         hasMore: false,
         activeIndex: 0,
         loading: false,
+        savingTags: false,
         viewMode: 'grid'
     };
 
@@ -439,12 +443,192 @@ document.addEventListener('DOMContentLoaded', () => {
             : 'Showing image preview. No XMP sidecar tags were found for this file.';
         lightboxImage.src = getViewerImageUrl(item.path);
         lightboxImage.alt = item.name;
-        lightboxTags.innerHTML = item.tags.map((tag) => (
-            `<span class="badge-secondary">${escapeHtml(tag)}</span>`
-        )).join('');
-        lightboxEmptyTags.classList.toggle('hidden', item.tags.length > 0);
+        renderLightboxTags();
         lightboxPrevBtn.disabled = viewerState.activeIndex === 0;
         lightboxNextBtn.disabled = viewerState.activeIndex >= viewerState.images.length - 1;
+    }
+
+    // ----- Lightbox tag editing (add / rename / delete XMP keywords) -----
+
+    function setLightboxTagError(message = '') {
+        lightboxTagError.textContent = message;
+        lightboxTagError.classList.toggle('hidden', !message);
+    }
+
+    function updateViewerRecordTags(index, tags) {
+        const item = viewerState.images[index];
+        if (!item) {
+            return;
+        }
+        item.tags = tags.filter(Boolean);
+        item.tag_count = item.tags.length;
+        if (item.tags.length > 0) {
+            item.xmp_exists = true;
+        }
+    }
+
+    async function persistLightboxTags(path, tags) {
+        const res = await fetch('/api/tags/keywords', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, tags })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || 'Failed to update tags.');
+        }
+        return data.tags || [];
+    }
+
+    async function commitLightboxTags(tags, controlEl) {
+        if (viewerState.savingTags) {
+            return;
+        }
+        const item = viewerState.images[viewerState.activeIndex];
+        if (!item) {
+            return;
+        }
+
+        viewerState.savingTags = true;
+        if (controlEl) {
+            controlEl.disabled = true;
+        }
+        setLightboxTagError('');
+
+        try {
+            const updated = await persistLightboxTags(item.path, tags);
+            updateViewerRecordTags(viewerState.activeIndex, updated);
+            renderViewerGallery();
+            renderLightbox();
+        } catch (error) {
+            setLightboxTagError(error.message);
+            renderLightboxTags();
+        } finally {
+            viewerState.savingTags = false;
+            if (controlEl) {
+                controlEl.disabled = false;
+            }
+        }
+    }
+
+    function lightboxTagActionButton(className, label, iconPaths, handler) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.title = label;
+        btn.setAttribute('aria-label', `${label} tag`);
+        btn.className = className;
+        btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</svg>`;
+        btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            handler(btn);
+        });
+        return btn;
+    }
+
+    function startTagRename(chip, tagIndex, original) {
+        if (viewerState.savingTags || chip.querySelector('input')) {
+            return;
+        }
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = original;
+        input.maxLength = 64;
+        input.className = 'h-6 w-32 rounded-md border border-border bg-background px-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary';
+
+        chip.replaceChildren(input);
+        input.focus();
+        input.select();
+
+        const finish = () => {
+            if (document.contains(input)) {
+                renderLightboxTags();
+            }
+        };
+
+        input.addEventListener('keydown', (event) => {
+            event.stopPropagation();
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const value = input.value.trim();
+                if (!value || value === original) {
+                    finish();
+                    return;
+                }
+                const tags = viewerState.images[viewerState.activeIndex].tags.slice();
+                tags[tagIndex] = value;
+                commitLightboxTags(tags, input);
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                finish();
+            }
+        });
+        input.addEventListener('blur', finish);
+        input.addEventListener('click', (event) => event.stopPropagation());
+    }
+
+    function renderLightboxTags() {
+        const item = viewerState.images[viewerState.activeIndex];
+        if (!item) {
+            return;
+        }
+
+        lightboxTags.innerHTML = '';
+        lightboxEmptyTags.classList.toggle('hidden', item.tags.length > 0);
+
+        item.tags.forEach((tag, tagIndex) => {
+            const chip = document.createElement('span');
+            chip.className = 'badge-secondary inline-flex items-center gap-1';
+
+            const label = document.createElement('span');
+            label.textContent = tag;
+            chip.appendChild(label);
+
+            chip.appendChild(lightboxTagActionButton(
+                'rounded p-0.5 text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-primary',
+                'Rename',
+                '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+                () => startTagRename(chip, tagIndex, tag)
+            ));
+            chip.appendChild(lightboxTagActionButton(
+                'rounded p-0.5 text-muted-foreground hover:text-destructive focus:outline-none focus-visible:ring-1 focus-visible:ring-destructive',
+                'Delete',
+                '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+                (deleteBtn) => {
+                    if (viewerState.savingTags) {
+                        return;
+                    }
+                    const tags = viewerState.images[viewerState.activeIndex].tags.slice();
+                    tags.splice(tagIndex, 1);
+                    commitLightboxTags(tags, deleteBtn);
+                }
+            ));
+
+            lightboxTags.appendChild(chip);
+        });
+    }
+
+    function addLightboxTag() {
+        if (viewerState.savingTags) {
+            return;
+        }
+        const item = viewerState.images[viewerState.activeIndex];
+        if (!item) {
+            return;
+        }
+
+        const value = lightboxNewTagInput.value.trim();
+        if (!value) {
+            return;
+        }
+        if (item.tags.includes(value)) {
+            setLightboxTagError(`"${value}" already exists on this image.`);
+            return;
+        }
+
+        commitLightboxTags([...item.tags, value]).then(() => {
+            lightboxNewTagInput.value = '';
+        });
     }
 
     function openLightboxAt(index) {
@@ -453,6 +637,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         viewerState.activeIndex = index;
+        viewerState.savingTags = false;
+        setLightboxTagError('');
+        lightboxNewTagInput.value = '';
         renderLightbox();
         const opener = viewerResults.querySelector(`[data-viewer-index="${index}"]`) || viewerLoadBtn;
         openDialog(lightboxDialog, {
@@ -837,8 +1024,22 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     lightboxPrevBtn.addEventListener('click', () => moveLightbox(-1));
     lightboxNextBtn.addEventListener('click', () => moveLightbox(1));
+    lightboxAddTagBtn.addEventListener('click', addLightboxTag);
+    lightboxNewTagInput.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            addLightboxTag();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            requestDialogClose(lightboxDialog);
+        }
+    });
     document.addEventListener('keydown', (event) => {
         if (!lightboxDialog.open) {
+            return;
+        }
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
             return;
         }
 
