@@ -359,6 +359,17 @@
                     </div>
                 </header>
                 <section class="space-y-4">
+                    <div id="viewer-filter-bar" class="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
+                        <input id="viewer-filter-input" type="text" class="input flex-1 min-w-[180px] !h-8 text-xs" placeholder="Filter by tag (Enter to add)..." autocomplete="off">
+                        <button id="viewer-clear-filters" type="button" class="btn-outline btn-sm hidden">Clear filters</button>
+                    </div>
+                    <div id="viewer-active-filters" class="flex flex-wrap items-center gap-2"></div>
+                    <div id="viewer-batch-bar" class="hidden flex flex-wrap items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2">
+                        <span id="viewer-selection-count" class="text-xs font-medium text-primary">0 selected</span>
+                        <input id="viewer-batch-keyword-input" type="text" class="input flex-1 min-w-[160px] !h-8 text-xs" placeholder="Keyword to apply...">
+                        <button id="viewer-batch-apply-btn" type="button" class="btn !h-8 text-xs">Apply to selected</button>
+                        <button id="viewer-clear-selection" type="button" class="btn-outline btn-sm !h-8">Clear</button>
+                    </div>
                     <div id="viewer-empty-state"
                         class="rounded-lg border border-dashed border-border/70 bg-muted/20 px-6 py-12 text-center">
                         <p class="text-base font-semibold">No folder loaded yet</p>

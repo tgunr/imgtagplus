@@ -92,6 +92,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const viewerGridModeBtn = document.getElementById('viewer-grid-mode');
     const viewerListModeBtn = document.getElementById('viewer-list-mode');
 
+    // Viewer filter / batch elements
+    const viewerFilterInput = document.getElementById('viewer-filter-input');
+    const viewerFilterBar = document.getElementById('viewer-filter-bar');
+    const viewerActiveFilters = document.getElementById('viewer-active-filters');
+    const viewerClearFiltersBtn = document.getElementById('viewer-clear-filters');
+    const viewerBatchBar = document.getElementById('viewer-batch-bar');
+    const viewerSelectionCount = document.getElementById('viewer-selection-count');
+    const viewerBatchKeywordInput = document.getElementById('viewer-batch-keyword-input');
+    const viewerBatchApplyBtn = document.getElementById('viewer-batch-apply-btn');
+    const viewerClearSelectionBtn = document.getElementById('viewer-clear-selection');
+
     // Lightbox Elements
     const lightboxTitle = document.getElementById('lightbox-title');
     const lightboxPosition = document.getElementById('lightbox-position');
@@ -150,12 +161,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const viewerState = {
         currentPath: '',
         images: [],
+        filteredImages: [],
         total: 0,
         offset: 0,
         hasMore: false,
         activeIndex: 0,
         loading: false,
-        viewMode: 'grid'
+        viewMode: 'grid',
+        filterTags: [],
+        selectedPaths: new Set()
     };
 
     // ----- Slider Progress -----
@@ -370,10 +384,11 @@ document.addEventListener('DOMContentLoaded', () => {
         renderViewerSummary();
         syncViewerLayoutToggle();
 
-        if (viewerState.images.length === 0) {
+        const items = viewerState.filteredImages;
+        if (items.length === 0) {
             setViewerEmptyState(
-                'No supported image files found',
-                'Try another folder or enable recursive browsing to search subdirectories too.'
+                'No images match the current filter',
+                'Clear the filter or load a different folder.'
             );
             return;
         }
@@ -383,15 +398,24 @@ document.addEventListener('DOMContentLoaded', () => {
         applyViewerLayout();
         viewerResults.innerHTML = '';
 
-        viewerState.images.forEach((item, index) => {
-            const card = document.createElement('button');
-            card.type = 'button';
-            card.dataset.viewerIndex = String(index);
+        items.forEach((item, filteredIndex) => {
+            const card = document.createElement('div');
+            card.className = 'group relative overflow-hidden rounded-xl border border-border/60 bg-background text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'absolute top-2 left-2 z-10 h-4 w-4 rounded border-border bg-background/80';
+            checkbox.checked = viewerState.selectedPaths.has(item.path);
+            checkbox.addEventListener('change', () => toggleSelection(item.path));
+
+            const inner = document.createElement('button');
+            inner.type = 'button';
+            inner.dataset.viewerIndex = String(filteredIndex);
             const tagBlock = renderViewerTags(item, viewerState.viewMode === 'grid' ? 4 : 6);
 
             if (viewerState.viewMode === 'grid') {
-                card.className = 'group overflow-hidden rounded-xl border border-border/60 bg-background text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary';
-                card.innerHTML = `
+                inner.className = 'w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary';
+                inner.innerHTML = `
                     <div class="aspect-[4/3] overflow-hidden bg-muted/30">
                         <img src="${getViewerImageUrl(item.path)}" alt="${escapeHtml(item.name)}"
                             class="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]">
@@ -405,8 +429,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 `;
             } else {
-                card.className = 'group flex w-full items-start gap-4 rounded-xl border border-border/60 bg-background p-4 text-left shadow-sm transition-all hover:border-primary/40 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary';
-                card.innerHTML = `
+                inner.className = 'flex w-full items-start gap-4 p-4 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary';
+                inner.innerHTML = `
                     <div class="h-24 w-32 shrink-0 overflow-hidden rounded-lg bg-muted/30">
                         <img src="${getViewerImageUrl(item.path)}" alt="${escapeHtml(item.name)}"
                             class="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]">
@@ -424,7 +448,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 `;
             }
 
-            card.addEventListener('click', () => openLightboxAt(index));
+            inner.addEventListener('click', () => openLightboxAt(filteredIndex));
+            card.appendChild(checkbox);
+            card.appendChild(inner);
             viewerResults.appendChild(card);
         });
 
@@ -432,12 +458,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderLightbox() {
-        const item = viewerState.images[viewerState.activeIndex];
+        const item = viewerState.filteredImages[viewerState.activeIndex];
         if (!item) {
             return;
         }
 
-        lightboxPosition.textContent = `${viewerState.activeIndex + 1} / ${viewerState.images.length}`;
+        lightboxPosition.textContent = `${viewerState.activeIndex + 1} / ${viewerState.filteredImages.length}`;
         lightboxTagCount.textContent = `${item.tag_count} tag${item.tag_count === 1 ? '' : 's'}`;
         lightboxTitle.textContent = item.name;
         lightboxPath.textContent = item.path;
@@ -451,7 +477,7 @@ document.addEventListener('DOMContentLoaded', () => {
         )).join('');
         lightboxEmptyTags.classList.toggle('hidden', item.tags.length > 0);
         lightboxPrevBtn.disabled = viewerState.activeIndex === 0;
-        lightboxNextBtn.disabled = viewerState.activeIndex >= viewerState.images.length - 1;
+        lightboxNextBtn.disabled = viewerState.activeIndex >= viewerState.filteredImages.length - 1;
 
         // Human keywords are sidecar-only, so fetch (or reuse cached) state
         // whenever the lightbox shows a different image.
@@ -459,7 +485,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function openLightboxAt(index) {
-        if (!viewerState.images[index]) {
+        if (!viewerState.filteredImages[index]) {
             return;
         }
 
@@ -476,7 +502,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function moveLightbox(step) {
         const nextIndex = viewerState.activeIndex + step;
-        if (!lightboxDialog.open || nextIndex < 0 || nextIndex >= viewerState.images.length) {
+        if (!lightboxDialog.open || nextIndex < 0 || nextIndex >= viewerState.filteredImages.length) {
             return;
         }
 
@@ -484,7 +510,190 @@ document.addEventListener('DOMContentLoaded', () => {
         renderLightbox();
     }
 
-    // ----- Initialization -----
+    // ----- Viewer filter / batch logic -----
+
+    function normalizeTag(tag) {
+        return String(tag || '').trim().toLowerCase();
+    }
+
+    function getAllKnownTags() {
+        const tags = new Set();
+        for (const item of viewerState.images) {
+            for (const tag of (item.tags || [])) {
+                tags.add(normalizeTag(tag));
+            }
+        }
+        return Array.from(tags).sort();
+    }
+
+    function applyFilter() {
+        const tags = viewerState.filterTags.map(normalizeTag).filter(Boolean);
+        viewerState.filterTags = tags;
+
+        if (tags.length === 0) {
+            viewerState.filteredImages = [...viewerState.images];
+        } else {
+            viewerState.filteredImages = viewerState.images.filter(item => {
+                const itemTags = new Set((item.tags || []).map(normalizeTag).filter(Boolean));
+                return tags.every(tag => itemTags.has(tag));
+            });
+        }
+
+        viewerState.activeIndex = Math.min(viewerState.activeIndex, Math.max(0, viewerState.filteredImages.length - 1));
+        viewerState.selectedPaths.clear();
+        renderActiveFilters();
+        renderBatchBar();
+        renderViewerGallery();
+    }
+
+    function addFilterTag(tag) {
+        const normalized = normalizeTag(tag);
+        if (!normalized || viewerState.filterTags.includes(normalized)) {
+            return;
+        }
+        viewerState.filterTags.push(normalized);
+        applyFilter();
+    }
+
+    function removeFilterTag(tag) {
+        viewerState.filterTags = viewerState.filterTags.filter(t => t !== normalizeTag(tag));
+        applyFilter();
+    }
+
+    function clearFilters() {
+        viewerState.filterTags = [];
+        applyFilter();
+    }
+
+    function renderActiveFilters() {
+        viewerActiveFilters.innerHTML = '';
+        const tags = viewerState.filterTags;
+        if (tags.length === 0) {
+            viewerActiveFilters.classList.add('hidden');
+            viewerFilterBar.classList.remove('hidden');
+            viewerFilterInput.value = '';
+            return;
+        }
+        viewerActiveFilters.classList.remove('hidden');
+        viewerFilterBar.classList.add('hidden');
+
+        for (const tag of tags) {
+            const chip = document.createElement('span');
+            chip.className = 'inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs font-medium text-primary';
+            const label = document.createElement('span');
+            label.textContent = tag;
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'font-semibold hover:text-destructive';
+            removeBtn.textContent = '\u00d7';
+            removeBtn.addEventListener('click', () => removeFilterTag(tag));
+            chip.append(label, removeBtn);
+            viewerActiveFilters.appendChild(chip);
+        }
+    }
+
+    function toggleSelection(path) {
+        if (viewerState.selectedPaths.has(path)) {
+            viewerState.selectedPaths.delete(path);
+        } else {
+            viewerState.selectedPaths.add(path);
+        }
+        renderBatchBar();
+        renderViewerGallery();
+    }
+
+    function clearSelection() {
+        viewerState.selectedPaths.clear();
+        renderBatchBar();
+        renderViewerGallery();
+    }
+
+    function selectAllFiltered() {
+        for (const item of viewerState.filteredImages) {
+            viewerState.selectedPaths.add(item.path);
+        }
+        renderBatchBar();
+        renderViewerGallery();
+    }
+
+    function renderBatchBar() {
+        const count = viewerState.selectedPaths.size;
+        viewerSelectionCount.textContent = `${count} selected`;
+        viewerBatchBar.classList.toggle('hidden', count === 0);
+    }
+
+    async function applyBatchKeyword() {
+        const keyword = viewerBatchKeywordInput.value.trim();
+        if (!keyword) return;
+
+        const paths = Array.from(viewerState.selectedPaths);
+        if (paths.length === 0) return;
+
+        viewerBatchApplyBtn.disabled = true;
+        try {
+            const res = await fetch('/api/tags/batch-keyword', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths, keyword })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Batch apply failed');
+
+            const updatedPaths = new Set();
+            for (const result of (data.results || [])) {
+                if (result.ok) {
+                    const img = viewerState.images.find(i => i.path === result.path);
+                    if (img) {
+                        const known = new Set(img.tags);
+                        for (const kw of (result.added || [])) {
+                            if (!known.has(kw)) {
+                                known.add(kw);
+                                img.tags.push(kw);
+                            }
+                        }
+                        img.tag_count = img.tags.length;
+                        updatedPaths.add(result.path);
+                    }
+                }
+            }
+
+            applyFilter();
+            viewerState.selectedPaths = new Set([...viewerState.selectedPaths].filter(p => updatedPaths.has(p)));
+            renderBatchBar();
+
+            addLog({level: 'INFO', message: `Applied "${keyword}" to ${updatedPaths.size} image(s).`});
+            viewerBatchKeywordInput.value = '';
+        } catch (error) {
+            addLog({level: 'ERROR', message: `Batch apply failed: ${error.message}`});
+        } finally {
+            viewerBatchApplyBtn.disabled = false;
+        }
+    }
+
+    async function refreshImageTags(path) {
+        try {
+            const res = await fetch(`/api/tags?path=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            if (!res.ok) return;
+            const tags = data.tags;
+            const img = viewerState.images.find(i => i.path === path);
+            if (img && tags) {
+                const flat = [];
+                for (const axis of Object.keys(tags.axes || {})) {
+                    const key = tags.axes[axis]?.key;
+                    if (key) flat.push(key);
+                }
+                for (const kw of (tags.user_keywords || [])) {
+                    if (!flat.includes(kw)) flat.push(kw);
+                }
+                img.tags = flat;
+                img.tag_count = flat.length;
+                applyFilter();
+            }
+        } catch (e) {
+            console.error('Failed to refresh tags for', path, e);
+        }
+    }
 
     async function init() {
         try {
@@ -846,13 +1055,31 @@ document.addEventListener('DOMContentLoaded', () => {
             loadViewerDirectory();
         }
     });
+
+    // Viewer filter / batch listeners
+    viewerFilterInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            addFilterTag(viewerFilterInput.value.trim());
+        }
+    });
+    viewerClearFiltersBtn.addEventListener('click', clearFilters);
+    viewerBatchApplyBtn.addEventListener('click', applyBatchKeyword);
+    viewerClearSelectionBtn.addEventListener('click', clearSelection);
+    viewerBatchKeywordInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            applyBatchKeyword();
+        }
+    });
+
     lightboxPrevBtn.addEventListener('click', () => moveLightbox(-1));
     lightboxNextBtn.addEventListener('click', () => moveLightbox(1));
 
     // ----- Lightbox keyword feedback -----
 
     function activeLightboxItem() {
-        return viewerState.images[viewerState.activeIndex] || null;
+        return viewerState.filteredImages[viewerState.activeIndex] || null;
     }
 
     function setKeywordNote(message, isError = false) {
@@ -1099,10 +1326,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!append) {
             viewerState.images = [];
+            viewerState.filteredImages = [];
             viewerState.total = 0;
             viewerState.offset = 0;
             viewerState.hasMore = false;
             viewerState.currentPath = path;
+            viewerState.filterTags = [];
+            viewerState.selectedPaths.clear();
+            renderActiveFilters();
+            renderBatchBar();
             viewerSummary.textContent = 'Loading files...';
             viewerCountBadge.textContent = 'Loading...';
             setViewerEmptyState('Loading files...', 'Gathering image previews and XMP tags for the selected folder.');
@@ -1133,9 +1365,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 viewerState.images = data.images;
             }
 
-            renderViewerGallery();
+            applyFilter();
         } catch (error) {
             viewerState.images = append ? viewerState.images : [];
+            viewerState.filteredImages = append ? viewerState.filteredImages : [];
             viewerState.total = append ? viewerState.total : 0;
             viewerState.offset = append ? viewerState.offset : 0;
             viewerState.hasMore = append ? viewerState.hasMore : false;

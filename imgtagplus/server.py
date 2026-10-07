@@ -613,6 +613,30 @@ def _propagate_keyword_feedback(donor_path: Path, artifact: dict) -> list[dict]:
     return applied
 
 
+def _apply_keyword_to_image(image_path: Path, keywords: list[str]) -> dict:
+    """Core keyword-apply logic for single-image and batch endpoints."""
+    from imgtagplus.metadata import _get_image_lock
+
+    with _get_image_lock(image_path):
+        sidecar = _load_tag_state(image_path)
+        existing = sanitize_user_keywords(sidecar.get("user_keywords"))
+        added_now = [k for k in keywords if k not in existing]
+        if not added_now:
+            return {"path": str(image_path), "added": [], "skipped": True}
+        sidecar["user_keywords"] = sorted(set(existing) | set(keywords))
+        merged = _save_tag_state(image_path, sidecar)
+        write_xmp(image_path, added_now)
+        artifact = read_tag_sidecar(image_path).get("feedback_for_future_scans") or {}
+        applied = _propagate_keyword_feedback(image_path, artifact) if added_now else []
+        return {
+            "path": str(image_path),
+            "added": added_now,
+            "user_keywords": list(read_tag_sidecar(image_path).get("user_keywords") or []),
+            "applied_to": applied,
+            "tags": merged,
+        }
+
+
 @app.put("/api/tags/keyword")
 async def put_keyword(request: Request):
     """Add free-form keywords to an image and offer them to similar siblings.
@@ -655,8 +679,6 @@ async def put_keyword(request: Request):
         persisted = read_tag_sidecar(image_path)
 
         if added_now:
-            # The viewer reads tags from XMP; put the new keywords there now
-            # so they are visible without waiting for a scan.
             write_xmp(image_path, added_now)
         artifact = persisted.get("feedback_for_future_scans") or {}
         applied = _propagate_keyword_feedback(image_path, artifact) if added_now else []
@@ -668,6 +690,45 @@ async def put_keyword(request: Request):
         "applied_to": applied,
         "tags": merged,
     }
+
+
+@app.put("/api/tags/batch-keyword")
+async def batch_keyword(request: Request):
+    """Apply one or more keywords to many images in one request.
+
+    Body: ``{paths: [...], keyword}`` or ``{paths: [...], keywords: [...]}``.
+    Returns per-image results including any immediate feedback propagation
+    that fired for each donor.
+    """
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _check_rate_limit(client_ip, 20):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    body = await request.json()
+    raw_paths = body.get("paths") or []
+    paths = [str(p).strip() for p in raw_paths if str(p).strip()]
+    raw = body.get("keywords")
+    if not isinstance(raw, list):
+        single = body.get("keyword")
+        raw = [single] if single is not None else []
+    if not paths or not raw:
+        raise HTTPException(status_code=400, detail="paths and keyword(s) required")
+    keywords = sanitize_user_keywords(raw)
+    if not keywords:
+        raise HTTPException(status_code=400, detail="no usable keywords supplied")
+
+    results = []
+    for path_str in paths:
+        try:
+            image_path = Path(path_str).resolve()
+            if not image_path.exists() or not image_path.is_file():
+                results.append({"path": path_str, "ok": False, "error": "file not found"})
+                continue
+            result = _apply_keyword_to_image(image_path, keywords)
+            results.append({"ok": True, **result})
+        except Exception as exc:
+            results.append({"path": path_str, "ok": False, "error": str(exc)})
+    return {"ok": True, "results": results}
 
 
 @app.put("/api/tags/keyword-remove")
