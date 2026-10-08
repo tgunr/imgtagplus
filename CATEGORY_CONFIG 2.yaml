@@ -1,0 +1,89 @@
+# Taxonomy / Tag-Editing Configuration — v0.1
+# Reference for child tasks t_5dcb6595, t_f8d7ce26. Not loaded by runtime.
+
+taxonomy_version: "0.1"
+key_format: UPPER_SNAKE_CASE
+label_format: Title Case
+axes:
+  - name: process
+    required_for_classifier: true
+  - name: geometry_kind
+  - name: material_family
+    default_value: UNKNOWN
+  - name: machine_context
+    nullable: true
+  - name: output_intent
+    nullable: true
+value_list_by_axis:
+  process:
+    - PROFILE_CUT
+    - POCKET_MILL
+    - ENGRAVE
+    - ETCH
+    - DRILL
+    - MARK
+    - INLAY
+    - FIXTURE
+    - STENCIL
+  geometry_kind:
+    - CONTOUR_PROFILE
+    - INNER_POCKET
+    - THROUGH_HOLE
+    - SLOT
+    - TEXT_GLYPH
+    - DECORATIVE_PATTERN
+    - SIGN_PANEL
+    - FITTING_PAIR
+  material_family:
+    - WOOD_SOFT
+    - WOOD_HARD
+    - ACRYLIC
+    - POLYCARB
+    - ALUMINUM
+    - STEEL
+    - COMPOSITE_PANEL
+    - PAPER_CARD
+    - UNKNOWN
+  machine_context:
+    - LASER_CO2
+    - LASER_FIBER
+    - CNC_ROUTER
+    - PEN_PLOTTER
+    - UV_FLATS
+  output_intent:
+    - PRODUCTION
+    - PROTOTYPE
+    - TEMPLATE
+    - DECORATIVE
+    - FUNCTIONAL
+precedence:
+  per_axis_order:
+    - user_tags.confirmed_by=user
+    - user_overrides
+    - user_tags.confirmed_by=unvetted
+    - derived_tags
+delete_behavior:
+  persist_in: user_deletions
+  list_format: list of axis_key or (axis_key, value_key) pairs
+  future_scan_effect: suppress that axis value from derived_tags if classifier proposes it
+confirmation_rules:
+  user_tag_requires:
+    confirmed_by: [user, taxonomy_owner]
+    set_at_utc: ISO8601
+    no_confidence: true
+  derived_tag_requires:
+    confidence: float_range_0_1
+    no_confirmed_by: true
+    scan_time_from_parent: true
+feedback_for_future_scans:
+  # Consumed by similarity mechanism (t_f8d7ce26) — not implemented here
+  fields:
+    - similar_file_hash_pattern: hash-prefix-bucket or perceptual-hash group
+    - user_confirmed_axes: list of axis keys user locked
+    - user_deleted_axes: list of axis keys user removed
+    - user_overrides: mapping axis_key -> user_value_key
+    - applied_at_utc: ISO8601 of edit save
+extension_points:
+  - new_axis: add to axes + value_list_by_axis; JSON contract unchanged (axes are object keys)
+  - promotion: taxonomy_owner changes user_tags.confirmed_by from unvetted -> taxonomy_owner; add value to value_list_by_axis
+  - new_format: SVG/DXF support (BASELINE.md gap) enables derived_tags emission but does not change taxonomy

@@ -28,6 +28,7 @@ from imgtagplus.metadata import (
     TAG_SIDECAR_SUFFIX,
     compute_file_hash,
     read_tag_sidecar,
+    read_xmp_tags,
     write_tag_sidecar,
     write_xmp,
 )
@@ -40,7 +41,9 @@ from imgtagplus.tags import (
     apply_feedback_at_scan,
     collect_similar_feedback,
     derive_tags_from_clip_results,
+    keyword_feedback_additions,
     make_override,
+    sanitize_user_keywords,
     validate_axis_key,
 )
 
@@ -92,6 +95,7 @@ def _persist_scan_taxonomy(
     *,
     feedback_index: list[dict] | None = None,
     output_dir: Path | None = None,
+    file_hash: str | None = None,
 ) -> None:
     """Persist this scan's derived taxonomy tags into the JSON sidecar.
 
@@ -105,7 +109,7 @@ def _persist_scan_taxonomy(
     :func:`_refresh_scan_feedback` to re-assert afterwards.
     """
     try:
-        file_hash = compute_file_hash(image_path)
+        file_hash = file_hash or compute_file_hash(image_path)
         sidecar = read_tag_sidecar(image_path, output_dir=output_dir)
         derived = derive_tags_from_clip_results(results)
 
@@ -460,9 +464,47 @@ def run(args: argparse.Namespace, progress_callback: Optional[Callable[[int, int
             )
             log.debug("  Full results: %s", results)
 
+            # Human keyword feedback: keywords typed on this or a similar
+            # image belong in this image's XMP bag too.  A clean slate
+            # (--overwrite) skips them — the caller declared the tags that
+            # should exist, and feedback must not resurrect after that.
+            extra_keyword_tags: list[str] = []
+            scan_file_hash: str | None = None
+            if not getattr(args, "overwrite", False):
+                try:
+                    pre_sidecar = read_tag_sidecar(img_path, output_dir=args.output_dir)
+                except Exception:
+                    pre_sidecar = {}
+                user_kw = sanitize_user_keywords(pre_sidecar.get("user_keywords"))
+                if user_kw:
+                    # Own keywords: surfaced again so a deleted sidecar XMP
+                    # does not silently drop human input.
+                    extra_keyword_tags.extend(user_kw)
+                if feedback_index:
+                    scan_file_hash = compute_file_hash(img_path)
+                    # XMP tags already on the image count toward the shared-tag
+                    # condition, so keyword chains established by earlier
+                    # scans keep propagating consistently.
+                    propagated = keyword_feedback_additions(
+                        feedback_index,
+                        [
+                            *tag_names,
+                            *user_kw,
+                            *read_xmp_tags(img_path, output_dir=args.output_dir),
+                        ],
+                        file_hash=scan_file_hash,
+                    )
+                    if propagated:
+                        extra_keyword_tags.extend(propagated)
+                        log.info(
+                            "  -> +%d feedback keyword(s): %s",
+                            len(propagated),
+                            ", ".join(propagated),
+                        )
+
             xmp_path = write_xmp(
                 img_path,
-                tag_names,
+                [*tag_names, *extra_keyword_tags],
                 output_dir=args.output_dir,
                 overwrite=getattr(args, "overwrite", False),
             )
@@ -472,6 +514,7 @@ def run(args: argparse.Namespace, progress_callback: Optional[Callable[[int, int
                 results,
                 feedback_index=feedback_index,
                 output_dir=args.output_dir,
+                file_hash=scan_file_hash,
             )
             _refresh_scan_feedback(img_path)
             success_count += 1

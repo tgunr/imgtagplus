@@ -4,3 +4,4 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 imgtagplus_*.log
+.DS_Store

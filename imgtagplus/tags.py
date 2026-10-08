@@ -252,9 +252,55 @@ DERIVED_CONFIDENCE_THRESHOLD: float = 0.25
 #: Number of leading hash characters used to bucket similar files.
 FEEDBACK_HASH_PREFIX_LEN: int = 8
 
+#: Shared tags an image must have with a donor before the donor's
+#: user-added keywords propagate to it (the "similar tags" rule).
+KEYWORD_FEEDBACK_MIN_INTERSECTION: int = 2
+
+#: Maximum number of user keywords stored per image.
+USER_KEYWORD_LIMIT: int = 200
+
+#: Maximum character length of a single user keyword; longer input is
+#: rejected as invalid rather than truncated.
+USER_KEYWORD_MAX_LEN: int = 64
+
+#: Cap on ``keyword_condition.must_intersect`` entries kept in an artifact,
+#: so a donor with a large XMP bag cannot bloat every sidecar it feeds.
+KEYWORD_CONDITION_LIMIT: int = 50
+
 
 class TaxonomyError(ValueError):
     """Raised when a tag, axis, or payload violates the taxonomy contract."""
+
+
+def normalize_keyword(raw: Any) -> str:
+    """Normalize a free-form user keyword for storage and matching.
+
+    Trims, collapses internal whitespace, lowercases, and rejects keywords
+    longer than ``USER_KEYWORD_MAX_LEN`` (returned as ``""``). The empty
+    string is the universal "invalid" value so callers can filter uniformly.
+    """
+    if raw is None:
+        return ""
+    text = " ".join(str(raw).split()).lower()
+    if not text or len(text) > USER_KEYWORD_MAX_LEN:
+        return ""
+    return text
+
+
+def sanitize_user_keywords(raw: Iterable[Any] | None) -> list[str]:
+    """Normalize, dedupe, and cap an iterable of raw keyword inputs.
+
+    Invalid entries (empty, too long) are dropped silently — this is for
+    bulk-merge paths where a partial list is better than a rejection.
+    """
+    keywords: list[str] = []
+    for item in (raw or ()):
+        normalized = normalize_keyword(item)
+        if normalized and normalized not in keywords:
+            keywords.append(normalized)
+            if len(keywords) >= USER_KEYWORD_LIMIT:
+                break
+    return keywords
 
 
 def label_for(key: str) -> str:
@@ -727,6 +773,9 @@ def build_feedback_artifact(
     user_tags: Mapping[str, Any] | None = None,
     user_deletions: Iterable[str] | None = None,
     user_overrides: Mapping[str, Any] | None = None,
+    user_keywords: Sequence[str] | None = None,
+    condition_keywords: Sequence[str] | None = None,
+    min_intersection: int = KEYWORD_FEEDBACK_MIN_INTERSECTION,
     applied_at_utc: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``feedback_for_future_scans`` artifact.
@@ -735,6 +784,10 @@ def build_feedback_artifact(
       * ``user_confirmed_axes`` — axes where ``confirmed_by == "user"``
       * ``user_deleted_axes``   — axes the human deleted
       * ``user_overrides``      — axis → ``{old, new, reason}``
+      * ``user_added_keywords`` — free-form keywords the human typed, gated by
+        ``keyword_condition`` (the tag list the image carried when the keyword
+        was added; target images sharing ``min_intersection`` of them inherit
+        the keywords)
 
     Axes with no human input are omitted entirely (never zero-filled), and an
     artifact with no human input at all is ``{}`` so callers can skip writing
@@ -743,6 +796,17 @@ def build_feedback_artifact(
     users = dict(user_tags or {})
     overrides = dict(user_overrides or {})
     deletions = sorted({a for a in (_deletion_axis(e) for e in (user_deletions or ())) if a})
+
+    added_keywords = sorted({
+        k for k in (normalize_keyword(x) for x in (user_keywords or ())) if k
+    })
+    condition_list = [
+        k for k in (normalize_keyword(c) for c in (condition_keywords or ())) if k
+    ][:KEYWORD_CONDITION_LIMIT]
+    try:
+        min_required = max(1, int(min_intersection))
+    except (TypeError, ValueError):
+        min_required = KEYWORD_FEEDBACK_MIN_INTERSECTION
 
     confirmed_axes: dict[str, str] = {}
     for axis in AXES:
@@ -762,7 +826,7 @@ def build_feedback_artifact(
                 "reason": str(record.get("reason") or ""),
             }
 
-    if not confirmed_axes and not deletions and not override_axes:
+    if not confirmed_axes and not deletions and not override_axes and not added_keywords:
         return {}
 
     artifact: dict[str, Any] = {
@@ -771,6 +835,12 @@ def build_feedback_artifact(
         "user_overrides": override_axes,
         "applied_at_utc": applied_at_utc or _utc_now_iso(),
     }
+    if added_keywords:
+        artifact["user_added_keywords"] = added_keywords
+        artifact["keyword_condition"] = {
+            "must_intersect": condition_list,
+            "min_intersection": min_required,
+        }
     pattern = hash_prefix_pattern(file_hash)
     if pattern:
         artifact["similar_file_hash_pattern"] = pattern
@@ -796,6 +866,71 @@ def feedback_applies_to_hash(
     prefix = pattern[:-1] if pattern.endswith("*") else pattern
     text = normalize_key(file_hash).replace("_", "")
     return bool(text) and bool(prefix) and text.startswith(prefix)
+
+
+def keyword_feedback_additions(
+    artifacts: Iterable[Mapping[str, Any] | None],
+    image_tags: Iterable[str] | None,
+    *,
+    file_hash: Any = None,
+) -> list[str]:
+    """Return the keywords *image_tags* inherits from keyword feedback.
+
+    Each artifact's ``user_added_keywords`` applies when either:
+
+    * its ``keyword_condition`` is met — the image shares at least
+      ``min_intersection`` of the donor's ``must_intersect`` tags (the
+      "images with similar tags" rule), or
+    * the artifact carries no usable condition and *file_hash* lands in the
+      artifact's hash-prefix bucket (the near-duplicate rule).
+
+    Matching normalizes both sides through :func:`normalize_keyword`, so it is
+    case- and whitespace-insensitive. Keywords the image already carries are
+    never returned, which also makes a donor's own artifact a no-op for
+    itself. Condition artifacts are evaluated independently — keywords and
+    their gating condition are never re-attached across donors.
+    """
+    tags_normalized = {normalize_keyword(t) for t in (image_tags or ())}
+    tags_normalized.discard("")
+
+    additions: list[str] = []
+    seen = set(tags_normalized)
+    for artifact in artifacts or ():
+        if not isinstance(artifact, Mapping):
+            continue
+        keywords = artifact.get("user_added_keywords")
+        if not isinstance(keywords, (list, tuple)) or not keywords:
+            continue
+
+        condition = artifact.get("keyword_condition")
+        bucket_rule = (
+            file_hash is not None and feedback_applies_to_hash(artifact, file_hash)
+        )
+        applies = False
+        if isinstance(condition, Mapping):
+            must = [
+                t for t in (normalize_keyword(t) for t in (condition.get("must_intersect") or ()))
+                if t
+            ]
+            try:
+                min_required = max(1, int(condition.get("min_intersection", KEYWORD_FEEDBACK_MIN_INTERSECTION)))
+            except (TypeError, ValueError):
+                min_required = KEYWORD_FEEDBACK_MIN_INTERSECTION
+            if must:
+                applies = len(tags_normalized & set(must)) >= min_required
+            else:
+                applies = bucket_rule
+        else:
+            applies = bucket_rule
+        if not applies:
+            continue
+
+        for keyword in keywords:
+            normalized = normalize_keyword(keyword)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                additions.append(normalized)
+    return additions
 
 
 def _feedback_specificity(artifact: Mapping[str, Any]) -> tuple[int, str]:
